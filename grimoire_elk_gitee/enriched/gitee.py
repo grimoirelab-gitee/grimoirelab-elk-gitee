@@ -39,6 +39,8 @@ from grimoire_elk.enriched.utils import get_time_diff_days
 
 from grimoire_elk.enriched.enrich import Enrich, metadata
 from grimoire_elk.elastic_mapping import Mapping as BaseMapping
+from grimoire_elk.enriched.graal_study_evolution import (get_to_date,
+                                    get_unique_repository)
 
 
 GITEE = 'https://gitee.com/'
@@ -99,6 +101,7 @@ class GiteeEnrich(Enrich):
 
         self.studies = []
         self.studies.append(self.enrich_onion)
+        self.studies.append(self.enrich_ossf_activity)
         # self.studies.append(self.enrich_pull_requests)
         # self.studies.append(self.enrich_geolocation)
         # self.studies.append(self.enrich_extra_data)
@@ -550,3 +553,67 @@ class GiteeEnrich(Enrich):
                              sort_on_field=sort_on_field,
                              no_incremental=no_incremental,
                              seconds=seconds)
+            
+    def enrich_ossf_activity(self, ocean_backend, enrich_backend, out_index,repo_in_index,
+                                 observations=20, probabilities=[0.5, 0.7, 0.9], interval_months=3,
+                                 date_field="metadata__updated_on"):
+
+        logger.info("[enrich-ossf-activity] Start study")
+        es_in = ES([enrich_backend.elastic_url], retry_on_timeout=True, timeout=100,
+                   verify_certs=self.elastic.requests.verify, connection_class=RequestsHttpConnection)
+        in_index = enrich_backend.elastic.index
+
+        unique_repos = es_in.search(
+            index=in_index,
+            body=get_unique_repository())
+
+        repositories = [repo['key'] for repo in unique_repos['aggregations']['unique_repos'].get('buckets', [])]
+        current_month = datetime_utcnow().replace(day=1, hour=0, minute=0, second=0)
+
+        logger.info("[enrich-ossf-activity] {} repositories to process".format(len(repositories)))
+        es_out = ElasticSearch(enrich_backend.elastic.url, out_index)
+        es_out.add_alias("ossf_activity_study")
+
+        num_items = 0
+        ins_items = 0
+
+        # iterate over the repositories
+        for repository_url in repositories:
+            logger.debug("[enrich-ossf-activity] Start analysis for {}".format(repository_url))
+            query_locations_no_geo_points = """
+         {
+              "query": {
+                "bool": {
+                    "filter": [
+                        {
+                            "term": {
+                                "origin": "%s"
+                            }
+                        },
+                        {
+                            "range": {
+                                "metadata__updated_on": {
+                                    "gte": "%s",
+                                    "lte": "%s"
+                                }
+                            }
+                        }
+                    ]
+                }
+              }
+            }
+        """ % (repository_url, "2020-01-01", "2023-01-01")
+        
+        gitee_pr_in_index = repo_in_index[2]
+
+        gitee_pr = es_in.search(index=gitee_pr_in_index, body=query_locations_no_geo_points)['hits']['hits']
+        code_review_count = sum(gitee_ipr['_source']['num_review_comments'] for gitee_ipr in gitee_pr)
+        print(gitee_pr)
+        activity_data = [{
+            "code_review_count":code_review_count,
+            "time":"2020-01-01",
+            'metadata__enriched_on': datetime_utcnow().isoformat()
+        }]
+        ins_items += es_out.bulk_upload(activity_data, "time")
+       
+        logger.info("[enrich-forecast-activity] End study")
