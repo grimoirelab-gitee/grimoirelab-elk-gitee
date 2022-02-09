@@ -181,7 +181,7 @@ class GiteeEnrich(Enrich):
         other than the user who created the issue and bot
         """
         comments = [comment for comment in item['comments_data']
-                    if item['user']['login'] != comment['user']['login']\
+                    if item['user']['login'] != comment['user']['login'] \
                     and not (comment['user']['name'].endswith("bot"))]
         return len(comments)
 
@@ -191,7 +191,7 @@ class GiteeEnrich(Enrich):
         other than the user who created the issue and bot
         """
         comment_dates = [str_to_datetime(comment['created_at']) for comment in item['comments_data']
-                         if item['user']['login'] != comment['user']['login']\
+                         if item['user']['login'] != comment['user']['login'] \
                          and not (comment['user']['name'].endswith("bot"))]
         if comment_dates:
             return min(comment_dates)
@@ -554,8 +554,8 @@ class GiteeEnrich(Enrich):
                              no_incremental=no_incremental,
                              seconds=seconds)
 
-    def enrich_ossf_activity(self, ocean_backend, enrich_backend, out_index, repo_in_index,
-                             from_date, end_date,probabilities=[0.5, 0.7, 0.9], interval_months=3,
+    def enrich_ossf_activity(self, ocean_backend, enrich_backend, out_index, git_demo_enriched_index, gitee_issues_enrich_index, gitee_pulls_enriched_index,
+                             gitee_repositories_raw_index, from_date, end_date,probabilities=[0.5, 0.7, 0.9], interval_months=3,
                              date_field="metadata__updated_on"):
 
         logger.info("[enrich-ossf-activity] Start study")
@@ -584,9 +584,44 @@ class GiteeEnrich(Enrich):
             activity_datas = []
             
             for date in data_list:
-                uuid_date = uuid(repository_url, date)
+                uuid_date = uuid(repository_url, str(date))             
+                query_code_review_count = self.get_query_code_review_count(repository_url, date)
+                gitee_pr = es_in.search(index=gitee_pulls_enriched_index, body=query_code_review_count)['hits']['hits'] 
+                code_review_count = sum(gitee_ipr['_source']['num_review_comments'] for gitee_ipr in gitee_pr)
+
+                query_created_since = self.get_created_since_query(repository_url)
+                gitee_create_since = es_in.search(index=gitee_repositories_raw_index, body=query_created_since)['hits']['hits']
+                created_since = get_time_diff_days(gitee_create_since[0]['_source']['data']["created_at"], str(date))
                 
-                query_locations_no_geo_points = """
+                
+                activity_data = {
+                    'uuid': uuid_date,
+                    'repo':repository_url,
+                    'code_review_count': code_review_count,
+                    'created_since':created_since,
+                    'grimoire_creation_date': date.strftime('%Y-%m-%d'),                                  
+                    'metadata__enriched_on': datetime_utcnow().isoformat()
+                }
+               
+                if created_since>0:
+                    activity_datas.append(activity_data)
+                if len(activity_datas) >= self.elastic.max_items_bulk:
+                        num_items += len(activity_datas)
+                        ins_items += es_out.bulk_upload(activity_datas, "uuid")
+                        activity_datas = []
+        if len(activity_datas) > 0:
+            num_items += len(activity_datas)
+            ins_items += es_out.bulk_upload(activity_datas, "uuid")
+        
+
+        logger.info("[enrich-forecast-activity] End study")
+
+    def get_date_list(self, begin_date, end_date):
+        date_list = [x for x in list(pd.date_range(freq='30D', start=begin_date, end=end_date))]
+        return date_list
+
+    def get_query_code_review_count(self, repository_url, date):
+        query_code_review_count = """
                     {
                         "query": {
                             "bool": {
@@ -608,33 +643,17 @@ class GiteeEnrich(Enrich):
                             }
                         }
                         }
-                    """ % (repository_url,(str_to_datetime(date) - timedelta(days = 90)).strftime("%Y-%m-%d"), date)
+                    """ % (repository_url,(date - timedelta(days = 90)).strftime("%Y-%m-%d"), date.strftime('%Y-%m-%d'))
+        return query_code_review_count  
 
-                gitee_pr_in_index = repo_in_index[2]
-
-                gitee_pr = es_in.search(index=gitee_pr_in_index, body=query_locations_no_geo_points)['hits']['hits']
-                
-                code_review_count = sum(gitee_ipr['_source']['num_review_comments'] for gitee_ipr in gitee_pr)
-                
-                activity_data = {
-                    'code_review_count': code_review_count,
-                    'time': date,
-                    'uuid': uuid_date,
-                    'metadata__enriched_on': datetime_utcnow().isoformat()
+    def get_created_since_query(self, repository_url):
+        query = """
+        {
+            "query": {
+                "match": {
+                "tag": "%s"
                 }
-                print(gitee_pr)
-                activity_datas.append(activity_data)
-                if len(activity_datas) >= self.elastic.max_items_bulk:
-                        num_items += len(activity_datas)
-                        ins_items += es_out.bulk_upload(activity_datas, "uuid")
-                        activity_datas = []
-        if len(activity_datas) > 0:
-            num_items += len(activity_datas)
-            ins_items += es_out.bulk_upload(activity_datas, "uuid")
-        
-
-        logger.info("[enrich-forecast-activity] End study")
-
-    def get_date_list(self, begin_date, end_date):
-        date_list = [x.strftime('%Y-%m-%d') for x in list(pd.date_range(freq='30D', start=begin_date, end=end_date))]
-        return date_list
+            }
+        }  
+        """ % (repository_url)
+        return query
