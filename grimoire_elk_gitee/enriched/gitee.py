@@ -26,12 +26,14 @@ import time
 import requests
 
 from dateutil.relativedelta import relativedelta
-from datetime import datetime
+from datetime import datetime, timedelta
+import pandas as pd
 
 from grimoire_elk.elastic import ElasticSearch
 from grimoire_elk.errors import ELKError
 from grimoirelab_toolkit.datetime import (datetime_utcnow,
-                                          str_to_datetime)
+                                          str_to_datetime,
+                                          datetime_to_utc)
 
 from elasticsearch import Elasticsearch as ES, RequestsHttpConnection
 
@@ -40,7 +42,9 @@ from grimoire_elk.enriched.utils import get_time_diff_days
 from grimoire_elk.enriched.enrich import Enrich, metadata
 from grimoire_elk.elastic_mapping import Mapping as BaseMapping
 from grimoire_elk.enriched.graal_study_evolution import (get_to_date,
-                                    get_unique_repository)
+                                                         get_unique_repository)
+
+from perceval.backend import uuid
 
 
 GITEE = 'https://gitee.com/'
@@ -170,24 +174,25 @@ class GiteeEnrich(Enrich):
         if comment_dates:
             return min(comment_dates)
         return None
-    #get comments and exclude bot  
+    #get comments and exclude bot
+
     def get_num_of_comments_without_bot(self, item):
         """Get the num of comment was made to the issue by someone
         other than the user who created the issue and bot
         """
         comments = [comment for comment in item['comments_data']
-                         if item['user']['login'] != comment['user']['login'] \
-                             and not (comment['user']['name'].endswith("bot"))]
+                    if item['user']['login'] != comment['user']['login']\
+                    and not (comment['user']['name'].endswith("bot"))]
         return len(comments)
-      
+
     #get first attendtion without bot
     def get_time_to_first_attention_without_bot(self, item):
         """Get the first date at which a comment was made to the issue by someone
         other than the user who created the issue and bot
         """
         comment_dates = [str_to_datetime(comment['created_at']) for comment in item['comments_data']
-                         if item['user']['login'] != comment['user']['login'] \
-                             and not (comment['user']['name'].endswith("bot"))]
+                         if item['user']['login'] != comment['user']['login']\
+                         and not (comment['user']['name'].endswith("bot"))]
         if comment_dates:
             return min(comment_dates)
         return None
@@ -226,7 +231,7 @@ class GiteeEnrich(Enrich):
 
         commenters = [comment['user']['login'] for comment in item['comments_data']]
         return len(set(commenters))
-    
+
     def get_CVE_message(self, item):
         """Get the first date at which a comment was made to the issue by someone
         other than the user who created the issue and bot
@@ -236,16 +241,13 @@ class GiteeEnrich(Enrich):
             cve_body = {}
             for message in issue_body:
                 try:
-                    [key,val] = message.split('：')
+                    [key, val] = message.split('：')
                     cve_body[key.strip()] = val.strip()
                 except Exception as e:
                     pass
             return cve_body
         else:
             return None
-    
-    
-
 
     @metadata
     def get_rich_item(self, item):
@@ -281,9 +283,9 @@ class GiteeEnrich(Enrich):
             rich_pr['time_to_close_days'] = \
                 get_time_diff_days(pull_request['created_at'], pull_request['merged_at'])
         else:
-           rich_pr['time_to_close_days'] = \
+            rich_pr['time_to_close_days'] = \
                 get_time_diff_days(pull_request['created_at'], pull_request['closed_at'])
-        
+
         #merged is not equal to closed in gitee
         if pull_request['state'] == 'open':
             rich_pr['time_open_days'] = \
@@ -466,18 +468,18 @@ class GiteeEnrich(Enrich):
                 get_time_diff_days(str_to_datetime(issue['created_at']),
                                    self.get_time_to_first_attention(issue))
             rich_issue['num_of_comments_without_bot'] = \
-                                   self.get_num_of_comments_without_bot(issue)
+                self.get_num_of_comments_without_bot(issue)
             rich_issue['time_to_first_attention_without_bot'] = \
                 get_time_diff_days(str_to_datetime(issue['created_at']),
-                                    self.get_time_to_first_attention_without_bot(issue))
-        
+                                   self.get_time_to_first_attention_without_bot(issue))
+
         cve_message = self.get_CVE_message(issue)
-        
-        if cve_message :
+
+        if cve_message:
             try:
                 scores = cve_message['BaseScore'].split(' ')
                 rich_issue['cve_public_time'] = cve_message['漏洞公开时间']
-                rich_issue['cve_create_time'] = rich_issue['created_at']          
+                rich_issue['cve_create_time'] = rich_issue['created_at']
                 rich_issue['cve_percerving_time'] = rich_issue['time_to_first_attention_without_bot'] if 'time_to_first_attention_without_bot' in rich_issue else None
                 rich_issue['cve_handling_time'] = rich_issue['time_open_days']
                 if len(scores) == 2:
@@ -489,7 +491,6 @@ class GiteeEnrich(Enrich):
             except Exception as error:
                 logger.error("CVE messgae is not complete: %s", error)
 
-               
         else:
             rich_issue['cve_public_time'] = None
             rich_issue['cve_create_time'] = None
@@ -497,13 +498,9 @@ class GiteeEnrich(Enrich):
             rich_issue['cve_level'] = None
             rich_issue['cve_percerving_time'] = None
             rich_issue['cve_handling_time'] = None
-           
 
-
-            
         rich_issue.update(self.get_grimoire_fields(issue['created_at'], "issue"))
 
-        
         item[self.get_field_date()] = rich_issue[self.get_field_date()]
         rich_issue.update(self.get_item_sh(item, self.issue_roles))
 
@@ -556,10 +553,10 @@ class GiteeEnrich(Enrich):
                              sort_on_field=sort_on_field,
                              no_incremental=no_incremental,
                              seconds=seconds)
-            
-    def enrich_ossf_activity(self, ocean_backend, enrich_backend, out_index,repo_in_index,
-                                 observations=20, probabilities=[0.5, 0.7, 0.9], interval_months=3,
-                                 date_field="metadata__updated_on"):
+
+    def enrich_ossf_activity(self, ocean_backend, enrich_backend, out_index, repo_in_index,
+                             from_date, end_date,probabilities=[0.5, 0.7, 0.9], interval_months=3,
+                             date_field="metadata__updated_on"):
 
         logger.info("[enrich-ossf-activity] Start study")
         es_in = ES([enrich_backend.elastic_url], retry_on_timeout=True, timeout=100,
@@ -571,7 +568,7 @@ class GiteeEnrich(Enrich):
             body=get_unique_repository())
 
         repositories = [repo['key'] for repo in unique_repos['aggregations']['unique_repos'].get('buckets', [])]
-        current_month = datetime_utcnow().replace(day=1, hour=0, minute=0, second=0)
+        # current_month = datetime_utcnow().replace(day=1, hour=0, minute=0, second=0)
 
         logger.info("[enrich-ossf-activity] {} repositories to process".format(len(repositories)))
         es_out = ElasticSearch(enrich_backend.elastic.url, out_index)
@@ -583,40 +580,61 @@ class GiteeEnrich(Enrich):
         # iterate over the repositories
         for repository_url in repositories:
             logger.debug("[enrich-ossf-activity] Start analysis for {}".format(repository_url))
-            query_locations_no_geo_points = """
-         {
-              "query": {
-                "bool": {
-                    "filter": [
-                        {
-                            "term": {
-                                "origin": "%s"
-                            }
-                        },
-                        {
-                            "range": {
-                                "metadata__updated_on": {
-                                    "gte": "%s",
-                                    "lte": "%s"
-                                }
+            data_list = self.get_date_list(datetime_to_utc(str_to_datetime(from_date)),datetime_to_utc(str_to_datetime(end_date)))
+            activity_datas = []
+            
+            for date in data_list:
+                uuid_date = uuid(repository_url, date)
+                
+                query_locations_no_geo_points = """
+                    {
+                        "query": {
+                            "bool": {
+                                "filter": [
+                                    {
+                                        "term": {
+                                            "origin": "%s"
+                                        }
+                                    },
+                                    {
+                                        "range": {
+                                            "metadata__updated_on": {
+                                                "gte": "%s",
+                                                "lte": "%s"
+                                            }
+                                        }
+                                    }
+                                ]
                             }
                         }
-                    ]
-                }
-              }
-            }
-        """ % (repository_url, "2020-01-01", "2023-01-01")
-        
-        gitee_pr_in_index = repo_in_index[2]
+                        }
+                    """ % (repository_url,(str_to_datetime(date) - timedelta(days = 90)).strftime("%Y-%m-%d"), date)
 
-        gitee_pr = es_in.search(index=gitee_pr_in_index, body=query_locations_no_geo_points)['hits']['hits']
-        code_review_count = sum(gitee_ipr['_source']['num_review_comments'] for gitee_ipr in gitee_pr)
-        print(gitee_pr)
-        activity_data = [{
-            "code_review_count":code_review_count,
-            "time":"2020-01-01",
-            'metadata__enriched_on': datetime_utcnow().isoformat()
-        }]
-        ins_items += es_out.bulk_upload(activity_data, "time")
-       
+                gitee_pr_in_index = repo_in_index[2]
+
+                gitee_pr = es_in.search(index=gitee_pr_in_index, body=query_locations_no_geo_points)['hits']['hits']
+                
+                code_review_count = sum(gitee_ipr['_source']['num_review_comments'] for gitee_ipr in gitee_pr)
+                
+                activity_data = {
+                    'code_review_count': code_review_count,
+                    'time': date,
+                    'uuid': uuid_date,
+                    'metadata__enriched_on': datetime_utcnow().isoformat()
+                }
+                print(gitee_pr)
+                activity_datas.append(activity_data)
+                if len(activity_datas) >= self.elastic.max_items_bulk:
+                        num_items += len(activity_datas)
+                        ins_items += es_out.bulk_upload(activity_datas, "uuid")
+                        activity_datas = []
+        if len(activity_datas) > 0:
+            num_items += len(activity_datas)
+            ins_items += es_out.bulk_upload(activity_datas, "uuid")
+        
+
         logger.info("[enrich-forecast-activity] End study")
+
+    def get_date_list(self, begin_date, end_date):
+        date_list = [x.strftime('%Y-%m-%d') for x in list(pd.date_range(freq='30D', start=begin_date, end=end_date))]
+        return date_list
