@@ -582,24 +582,45 @@ class GiteeEnrich(Enrich):
             logger.debug("[enrich-ossf-activity] Start analysis for {}".format(repository_url))
             data_list = self.get_date_list(datetime_to_utc(str_to_datetime(from_date)),datetime_to_utc(str_to_datetime(end_date)))
             activity_datas = []
+
+            query_author_uuid_data = self.get_uuid_count(repository_url, "author_uuid")
+            author_uuid_count = es_in.search(index=(git_demo_enriched_index,gitee_pulls_enriched_index,gitee_issues_enrich_index), body=query_author_uuid_data)['aggregations']["num_of_uuids"]['value']
+            query_assignee_uuid_data = self.get_uuid_count(repository_url, "assignee_data_uuid")
+            assignee_data_uuid_count = es_in.search(index=gitee_issues_enrich_index, body=query_assignee_uuid_data)['aggregations']["num_of_uuids"]['value']
+            query_merge_uuid_data = self.get_uuid_count(gitee_pulls_enriched_index, "merge_author_login")
+            merge_login_count = es_in.search(index=gitee_issues_enrich_index, body=query_merge_uuid_data)['aggregations']["num_of_uuids"]['value']
+            countributor_count = author_uuid_count+assignee_data_uuid_count+merge_login_count
+
+            query_created_since = self.get_created_since_query(repository_url)
+            gitee_create_since = es_in.search(index=gitee_repositories_raw_index, body=query_created_since)['hits']['hits']
+            
+               
             
             for date in data_list:
                 uuid_date = uuid(repository_url, str(date))             
-                query_code_review_count = self.get_query_code_review_count(repository_url, date)
+                query_code_review_count = self.get_data_before_dates(repository_url, date)
                 gitee_pr = es_in.search(index=gitee_pulls_enriched_index, body=query_code_review_count)['hits']['hits'] 
                 code_review_count = sum(gitee_ipr['_source']['num_review_comments'] for gitee_ipr in gitee_pr)
 
-                query_created_since = self.get_created_since_query(repository_url)
-                gitee_create_since = es_in.search(index=gitee_repositories_raw_index, body=query_created_since)['hits']['hits']
+                 
+                query_updated_since = self.get_updated_since_query(repository_url+'.git', date)
+                gitee_updated_since = es_in.search(index=git_demo_enriched_index, body=query_updated_since)['hits']['hits']
+                
                 created_since = get_time_diff_days(gitee_create_since[0]['_source']['data']["created_at"], str(date))
                 
-                
+                if gitee_updated_since:
+                    updated_since = get_time_diff_days(gitee_updated_since[0]['_source']["metadata__updated_on"], str(date))
+                    
+                else:
+                    continue
                 activity_data = {
                     'uuid': uuid_date,
                     'repo':repository_url,
                     'code_review_count': code_review_count,
                     'created_since':created_since,
-                    'grimoire_creation_date': date.strftime('%Y-%m-%d'),                                  
+                    'updated_since':updated_since,
+                    'countributor_count':countributor_count,
+                    'grimoire_creation_date': date.isoformat(),                                  
                     'metadata__enriched_on': datetime_utcnow().isoformat()
                 }
                
@@ -617,34 +638,34 @@ class GiteeEnrich(Enrich):
         logger.info("[enrich-forecast-activity] End study")
 
     def get_date_list(self, begin_date, end_date):
-        date_list = [x for x in list(pd.date_range(freq='30D', start=begin_date, end=end_date))]
+        date_list = [x for x in list(pd.date_range(freq='7D', start=begin_date, end=end_date))]
         return date_list
 
-    def get_query_code_review_count(self, repository_url, date):
-        query_code_review_count = """
-                    {
-                        "query": {
-                            "bool": {
-                                "filter": [
-                                    {
-                                        "term": {
-                                            "origin": "%s"
-                                        }
-                                    },
-                                    {
-                                        "range": {
-                                            "metadata__updated_on": {
-                                                "gte": "%s",
-                                                "lte": "%s"
-                                            }
-                                        }
-                                    }
-                                ]
+    def get_data_before_dates(self, repository_url, date):
+        query = """
+        {
+            "query": {
+                "bool": {
+                    "filter": [
+                        {
+                            "term": {
+                                "origin": "%s"
+                            }
+                        },
+                        {
+                            "range": {
+                                "metadata__updated_on": {
+                                    "gte": "%s",
+                                    "lte": "%s"
+                                }
                             }
                         }
-                        }
-                    """ % (repository_url,(date - timedelta(days = 90)).strftime("%Y-%m-%d"), date.strftime('%Y-%m-%d'))
-        return query_code_review_count  
+                    ]
+                }
+            }
+            }
+        """ % (repository_url,(date - timedelta(days = 90)).strftime("%Y-%m-%d"), date.strftime('%Y-%m-%d'))
+        return query  
 
     def get_created_since_query(self, repository_url):
         query = """
@@ -653,7 +674,66 @@ class GiteeEnrich(Enrich):
                 "match": {
                 "tag": "%s"
                 }
+            },
+             "sort": [
+            {
+            "metadata__updated_on": { "order": "desc"}
             }
+        ]
         }  
         """ % (repository_url)
+        return query
+
+
+    def get_updated_since_query(self, repository_url, date):
+        query = """
+      {
+            "query": {
+                "bool": {
+                    "filter": [
+                        {
+                            "term": {
+                                "origin": "%s"
+                            }
+                        },
+                        {
+                            "range": {
+                                "metadata__updated_on": {
+                                    
+                                    "lte": "%s"
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+             "sort": [
+            {
+            "metadata__updated_on": { "order": "desc"}
+            }]
+                        }
+        """ % (repository_url, date.strftime("%Y-%m-%d"))
+        return query
+
+    def get_uuid_count(self, repo_url, field):
+        query = """
+           {
+            "size" : 0,
+            "aggs" : {
+                "num_of_uuids" : {
+                    "cardinality" : {
+                    "field" : "%s"
+                    }
+                }
+            },
+            "query": {
+            "simple_query_string": {
+            "query": "%s*",
+            "fields": [
+                "origin"
+            ]
+            }
+        }
+        }
+        """%(field, repo_url)
         return query
