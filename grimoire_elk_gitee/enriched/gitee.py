@@ -583,17 +583,14 @@ class GiteeEnrich(Enrich):
             data_list = self.get_date_list(datetime_to_utc(str_to_datetime(from_date)),datetime_to_utc(str_to_datetime(end_date)))
             activity_datas = []
 
-            query_author_uuid_data = self.get_uuid_count(repository_url, "author_uuid")
-            author_uuid_count = es_in.search(index=(git_demo_enriched_index,gitee_pulls_enriched_index,gitee_issues_enrich_index), body=query_author_uuid_data)['aggregations']["num_of_uuids"]['value']
-            query_assignee_uuid_data = self.get_uuid_count(repository_url, "assignee_data_uuid")
-            assignee_data_uuid_count = es_in.search(index=gitee_issues_enrich_index, body=query_assignee_uuid_data)['aggregations']["num_of_uuids"]['value']
-            query_merge_uuid_data = self.get_uuid_count(gitee_pulls_enriched_index, "merge_author_login")
-            merge_login_count = es_in.search(index=gitee_issues_enrich_index, body=query_merge_uuid_data)['aggregations']["num_of_uuids"]['value']
-            countributor_count = author_uuid_count+assignee_data_uuid_count+merge_login_count
-
+          
             query_created_since = self.get_created_since_query(repository_url)
             gitee_create_since = es_in.search(index=gitee_repositories_raw_index, body=query_created_since)['hits']['hits']
+            query_first_commit_since = self.get_created_since_query(repository_url+".git", order="asc")
+            first_commit_since= es_in.search(index=git_demo_enriched_index, body=query_first_commit_since)['hits']['hits']
             
+            creation_since = min(gitee_create_since[0]['_source']['data']["created_at"], first_commit_since[0]['_source']["metadata__updated_on"])
+           
                
             
             for date in data_list:
@@ -606,10 +603,27 @@ class GiteeEnrich(Enrich):
                 query_updated_since = self.get_updated_since_query(repository_url+'.git', date)
                 gitee_updated_since = es_in.search(index=git_demo_enriched_index, body=query_updated_since)['hits']['hits']
                 
-                created_since = get_time_diff_days(gitee_create_since[0]['_source']['data']["created_at"], str(date))
+                created_since = get_time_diff_days(creation_since, str(date))
                 
+                query_author_uuid_data = self.get_uuid_count(repository_url, "author_uuid", to_date=date)
+                author_uuid_count = es_in.search(index=(git_demo_enriched_index,gitee_pulls_enriched_index,gitee_issues_enrich_index), body=query_author_uuid_data)['aggregations']["count_of_uuid"]['value']
+                query_assignee_uuid_data = self.get_uuid_count(repository_url, "assignee_data_uuid", to_date=date)
+                assignee_data_uuid_count = es_in.search(index=gitee_issues_enrich_index, body=query_assignee_uuid_data)['aggregations']["count_of_uuid"]['value']
+                query_merge_uuid_data = self.get_uuid_count(gitee_pulls_enriched_index, "merge_author_login", to_date=date)
+                merge_login_count = es_in.search(index=gitee_issues_enrich_index, body=query_merge_uuid_data)['aggregations']["count_of_uuid"]['value']
+                countributor_count = author_uuid_count+assignee_data_uuid_count+merge_login_count
+
+                query_issue_closed = self.get_issue_closes_uuid_count(repository_url, "uuid", to_date=date)
+                issue_closed = es_in.search(index=gitee_issues_enrich_index, body=query_issue_closed)['aggregations']["count_of_uuid"]['value']
+
+                # query_issue_updated_since = self.get_updated_since_query(repository_url, date)
+                # updated_issues_count = es_in.search(index=gitee_issues_enrich_index, body=query_issue_updated_since)['hits']['total']['value']
+                query_issue_updated_since = self.get_uuid_count(repository_url, "uuid", to_date = date)
+                updated_issues_count = es_in.search(index=gitee_issues_enrich_index, body=query_issue_updated_since)['aggregations']["count_of_uuid"]['value']
+
                 if gitee_updated_since:
                     updated_since = get_time_diff_days(gitee_updated_since[0]['_source']["metadata__updated_on"], str(date))
+                    # updated_issues_count = gitee_issue_updated_since
                     
                 else:
                     continue
@@ -620,6 +634,8 @@ class GiteeEnrich(Enrich):
                     'created_since':created_since,
                     'updated_since':updated_since,
                     'countributor_count':countributor_count,
+                    'updated_issues_count':updated_issues_count,
+                    'closed_issue_count':issue_closed,
                     'grimoire_creation_date': date.isoformat(),                                  
                     'metadata__enriched_on': datetime_utcnow().isoformat()
                 }
@@ -656,7 +672,7 @@ class GiteeEnrich(Enrich):
                             "range": {
                                 "metadata__updated_on": {
                                     "gte": "%s",
-                                    "lte": "%s"
+                                    "lt": "%s"
                                 }
                             }
                         }
@@ -667,7 +683,7 @@ class GiteeEnrich(Enrich):
         """ % (repository_url,(date - timedelta(days = 90)).strftime("%Y-%m-%d"), date.strftime('%Y-%m-%d'))
         return query  
 
-    def get_created_since_query(self, repository_url):
+    def get_created_since_query(self, repository_url, order="desc"):
         query = """
         {
             "query": {
@@ -677,11 +693,11 @@ class GiteeEnrich(Enrich):
             },
              "sort": [
             {
-            "metadata__updated_on": { "order": "desc"}
+            "metadata__updated_on": { "order": "%s"}
             }
         ]
         }  
-        """ % (repository_url)
+        """ % (repository_url, order)
         return query
 
 
@@ -700,7 +716,7 @@ class GiteeEnrich(Enrich):
                             "range": {
                                 "metadata__updated_on": {
                                     
-                                    "lte": "%s"
+                                    "lt": "%s"
                                 }
                             }
                         }
@@ -711,29 +727,79 @@ class GiteeEnrich(Enrich):
             {
             "metadata__updated_on": { "order": "desc"}
             }]
-                        }
+        }
         """ % (repository_url, date.strftime("%Y-%m-%d"))
         return query
 
-    def get_uuid_count(self, repo_url, field):
+    def get_uuid_count(self, repo_url, field, from_date=str_to_datetime("1970-01-01"), to_date= datetime_utcnow()):
         query = """
-           {
-            "size" : 0,
-            "aggs" : {
-                "num_of_uuids" : {
-                    "cardinality" : {
-                    "field" : "%s"
+            {
+                "size" : 0,
+                "aggs" : {
+                    "count_of_uuid" : {
+                        "cardinality" : {
+                        "field" : "%s"
+                        }
                     }
+                },
+                "query": {
+                "bool": { 
+                "must": {
+                "simple_query_string": {
+                        "query": "%s*",
+                        "fields": [
+                            "origin"
+                        ]
+                        }
+            },
+            "filter": {
+                    "range": { "grimoire_creation_date": { "gte": "%s" ,"lt": "%s"}} 
+                    }}
+            
+            }
+                
+            }
+        """% (field, repo_url, from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
+           
+        return query
+
+    def get_issue_closes_uuid_count(self, repo_url, field, from_date=str_to_datetime("1970-01-01"), to_date= datetime_utcnow()):
+        query = """
+        {
+        "size": 0,
+        "aggs": {
+            "count_of_uuid": {
+            "cardinality": {
+                "field": "%s"
+            }
+            }
+        },
+        "query": {
+            "bool": {
+            "must": {
+                "simple_query_string": {
+                "query": "%s",
+                "fields": [
+                    "origin"
+                ]
                 }
             },
-            "query": {
-            "simple_query_string": {
-            "query": "%s*",
-            "fields": [
-                "origin"
+            "should": [
+                {"term":{"state": "closed"}},
+                {"term":{"state": "rejected"}}
             ]
+            
+            ,
+            "filter": {
+                "range": {
+                "closed_at": {
+                    "gte": "%s",
+                    "lt": "%s"
+                }
+                }
+            }
             }
         }
         }
-        """%(field, repo_url)
+        """%(field, repo_url, from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
         return query
