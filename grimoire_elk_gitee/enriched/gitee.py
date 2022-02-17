@@ -555,8 +555,8 @@ class GiteeEnrich(Enrich):
                              seconds=seconds)
 
     def enrich_activity(self, ocean_backend, enrich_backend, out_index, git_demo_enriched_index, gitee_issues_enrich_index, gitee_pulls_enriched_index,
-                             gitee_repositories_raw_index, from_date, end_date,probabilities=[0.5, 0.7, 0.9], interval_months=3,
-                             date_field="metadata__updated_on"):
+                             gitee_repositories_raw_index, from_date, end_date,probabilities=[0.5, 0.7, 0.9]
+                            ):
 
         logger.info("[enrich-activity] Start study")
         es_in = ES([enrich_backend.elastic_url], retry_on_timeout=True, timeout=100,
