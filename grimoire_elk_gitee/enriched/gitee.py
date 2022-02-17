@@ -105,7 +105,7 @@ class GiteeEnrich(Enrich):
 
         self.studies = []
         self.studies.append(self.enrich_onion)
-        self.studies.append(self.enrich_ossf_activity)
+        self.studies.append(self.enrich_activity)
         # self.studies.append(self.enrich_pull_requests)
         # self.studies.append(self.enrich_geolocation)
         # self.studies.append(self.enrich_extra_data)
@@ -554,11 +554,11 @@ class GiteeEnrich(Enrich):
                              no_incremental=no_incremental,
                              seconds=seconds)
 
-    def enrich_ossf_activity(self, ocean_backend, enrich_backend, out_index, git_demo_enriched_index, gitee_issues_enrich_index, gitee_pulls_enriched_index,
+    def enrich_activity(self, ocean_backend, enrich_backend, out_index, git_demo_enriched_index, gitee_issues_enrich_index, gitee_pulls_enriched_index,
                              gitee_repositories_raw_index, from_date, end_date,probabilities=[0.5, 0.7, 0.9], interval_months=3,
                              date_field="metadata__updated_on"):
 
-        logger.info("[enrich-ossf-activity] Start study")
+        logger.info("[enrich-activity] Start study")
         es_in = ES([enrich_backend.elastic_url], retry_on_timeout=True, timeout=100,
                    verify_certs=self.elastic.requests.verify, connection_class=RequestsHttpConnection)
         in_index = enrich_backend.elastic.index
@@ -570,20 +570,19 @@ class GiteeEnrich(Enrich):
         repositories = [repo['key'] for repo in unique_repos['aggregations']['unique_repos'].get('buckets', [])]
         # current_month = datetime_utcnow().replace(day=1, hour=0, minute=0, second=0)
 
-        logger.info("[enrich-ossf-activity] {} repositories to process".format(len(repositories)))
+        logger.info("[enrich-activity] {} repositories to process".format(len(repositories)))
         es_out = ElasticSearch(enrich_backend.elastic.url, out_index)
-        es_out.add_alias("ossf_activity_study")
+        es_out.add_alias("activity_study")
 
         num_items = 0
         ins_items = 0
 
         # iterate over the repositories
         for repository_url in repositories:
-            logger.debug("[enrich-ossf-activity] Start analysis for {}".format(repository_url))
+            logger.debug("[enrich-activity] Start analysis for {}".format(repository_url))
             data_list = self.get_date_list(datetime_to_utc(str_to_datetime(from_date)),datetime_to_utc(str_to_datetime(end_date)))
             activity_datas = []
-
-          
+       
             query_created_since = self.get_created_since_query(repository_url)
             gitee_create_since = es_in.search(index=gitee_repositories_raw_index, body=query_created_since)['hits']['hits']
             query_first_commit_since = self.get_created_since_query(repository_url+".git", order="asc")
@@ -591,14 +590,25 @@ class GiteeEnrich(Enrich):
             
             creation_since = min(gitee_create_since[0]['_source']['data']["created_at"], first_commit_since[0]['_source']["metadata__updated_on"])
            
-               
-            
             for date in data_list:
                 uuid_date = uuid(repository_url, str(date))             
                 query_code_review_count = self.get_data_before_dates(repository_url, date)
-                gitee_pr = es_in.search(index=gitee_pulls_enriched_index, body=query_code_review_count)['hits']['hits'] 
-                code_review_count = sum(gitee_ipr['_source']['num_review_comments'] for gitee_ipr in gitee_pr)
-
+                gitee_pr = es_in.search(index=gitee_pulls_enriched_index, body=query_code_review_count)['hits']
+                gitee_issue = es_in.search(index=gitee_issues_enrich_index, body=query_code_review_count)['hits']
+                try:
+                    code_review_count = sum(gitee_ipr['_source']['num_review_comments'] for gitee_ipr in gitee_pr['hits'] )/gitee_pr["total"]["value"] 
+                except ZeroDivisionError:
+                    code_review_count = 0
+                
+                try:
+                    issue_comments = 0
+                    for gitee_iissue in gitee_issue['hits']:
+                        if 'num_of_comments_without_bot' in gitee_iissue['_source']:
+                            issue_comments += gitee_iissue['_source']['num_of_comments_without_bot']
+                                                       
+                    comment_frequency = issue_comments/gitee_issue["total"]["value"]
+                except ZeroDivisionError:
+                    comment_frequency = 0
                  
                 query_updated_since = self.get_updated_since_query(repository_url+'.git', date)
                 gitee_updated_since = es_in.search(index=git_demo_enriched_index, body=query_updated_since)['hits']['hits']
@@ -613,29 +623,31 @@ class GiteeEnrich(Enrich):
                 merge_login_count = es_in.search(index=gitee_issues_enrich_index, body=query_merge_uuid_data)['aggregations']["count_of_uuid"]['value']
                 countributor_count = author_uuid_count+assignee_data_uuid_count+merge_login_count
 
-                query_issue_closed = self.get_issue_closes_uuid_count(repository_url, "uuid", to_date=date)
+                query_issue_closed = self.get_issue_closes_uuid_count(repository_url, "uuid", from_date=(date - timedelta(days = 90)), to_date=date)
                 issue_closed = es_in.search(index=gitee_issues_enrich_index, body=query_issue_closed)['aggregations']["count_of_uuid"]['value']
 
-                # query_issue_updated_since = self.get_updated_since_query(repository_url, date)
-                # updated_issues_count = es_in.search(index=gitee_issues_enrich_index, body=query_issue_updated_since)['hits']['total']['value']
-                query_issue_updated_since = self.get_uuid_count(repository_url, "uuid", to_date = date)
+                query_issue_updated_since = self.get_uuid_count(repository_url, "uuid", from_date=(date - timedelta(days = 90)),to_date=date)
                 updated_issues_count = es_in.search(index=gitee_issues_enrich_index, body=query_issue_updated_since)['aggregations']["count_of_uuid"]['value']
 
+                query_git_commit = self.get_uuid_count(repository_url, "uuid", from_date=date-timedelta(days=365), to_date=date)
+                commit_frequency = es_in.search(index=git_demo_enriched_index, body=query_git_commit)['aggregations']["count_of_uuid"]['value']/52
+                
                 if gitee_updated_since:
                     updated_since = get_time_diff_days(gitee_updated_since[0]['_source']["metadata__updated_on"], str(date))
-                    # updated_issues_count = gitee_issue_updated_since
                     
                 else:
                     continue
                 activity_data = {
                     'uuid': uuid_date,
-                    'repo':repository_url,
-                    'code_review_count': code_review_count,
+                    'repo':repository_url,                 
                     'created_since':created_since,
                     'updated_since':updated_since,
+                    'commit_frequency':commit_frequency,
                     'countributor_count':countributor_count,
+                    'code_review_count': '%.3f' % code_review_count,
                     'updated_issues_count':updated_issues_count,
                     'closed_issue_count':issue_closed,
+                    'comment_frequency':comment_frequency,
                     'grimoire_creation_date': date.isoformat(),                                  
                     'metadata__enriched_on': datetime_utcnow().isoformat()
                 }
