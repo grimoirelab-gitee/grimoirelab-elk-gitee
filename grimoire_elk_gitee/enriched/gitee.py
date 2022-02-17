@@ -555,8 +555,7 @@ class GiteeEnrich(Enrich):
                              seconds=seconds)
 
     def enrich_activity(self, ocean_backend, enrich_backend, out_index, git_demo_enriched_index, gitee_issues_enrich_index, gitee_pulls_enriched_index,
-                             gitee_repositories_raw_index, from_date, end_date,probabilities=[0.5, 0.7, 0.9]
-                            ):
+                             gitee_repositories_raw_index, from_date, end_date,probabilities=[0.5, 0.7, 0.9]):
 
         logger.info("[enrich-activity] Start study")
         es_in = ES([enrich_backend.elastic_url], retry_on_timeout=True, timeout=100,
@@ -580,7 +579,7 @@ class GiteeEnrich(Enrich):
         # iterate over the repositories
         for repository_url in repositories:
             logger.debug("[enrich-activity] Start analysis for {}".format(repository_url))
-            data_list = self.get_date_list(datetime_to_utc(str_to_datetime(from_date)),datetime_to_utc(str_to_datetime(end_date)))
+            dates_list = self.get_date_list(datetime_to_utc(str_to_datetime(from_date)),datetime_to_utc(str_to_datetime(end_date)))
             activity_datas = []
        
             query_created_since = self.get_created_since_query(repository_url)
@@ -590,7 +589,7 @@ class GiteeEnrich(Enrich):
             
             creation_since = min(gitee_create_since[0]['_source']['data']["created_at"], first_commit_since[0]['_source']["metadata__updated_on"])
            
-            for date in data_list:
+            for date in dates_list:
                 uuid_date = uuid(repository_url, str(date))             
                 query_code_review_count = self.get_data_before_dates(repository_url, date)
                 gitee_pr = es_in.search(index=gitee_pulls_enriched_index, body=query_code_review_count)['hits']
@@ -598,8 +597,7 @@ class GiteeEnrich(Enrich):
                 try:
                     code_review_count = sum(gitee_ipr['_source']['num_review_comments'] for gitee_ipr in gitee_pr['hits'] )/gitee_pr["total"]["value"] 
                 except ZeroDivisionError:
-                    code_review_count = 0
-                
+                    code_review_count = 0               
                 try:
                     issue_comments = 0
                     for gitee_iissue in gitee_issue['hits']:
@@ -613,7 +611,7 @@ class GiteeEnrich(Enrich):
                 query_updated_since = self.get_updated_since_query(repository_url+'.git', date)
                 gitee_updated_since = es_in.search(index=git_demo_enriched_index, body=query_updated_since)['hits']['hits']
                 
-                created_since = get_time_diff_days(creation_since, str(date))
+                created_since = get_time_diff_months(creation_since, str(date))
                 
                 query_author_uuid_data = self.get_uuid_count(repository_url, "author_uuid", to_date=date)
                 author_uuid_count = es_in.search(index=(git_demo_enriched_index,gitee_pulls_enriched_index,gitee_issues_enrich_index), body=query_author_uuid_data)['aggregations']["count_of_uuid"]['value']
@@ -633,7 +631,7 @@ class GiteeEnrich(Enrich):
                 commit_frequency = es_in.search(index=git_demo_enriched_index, body=query_git_commit)['aggregations']["count_of_uuid"]['value']/52
                 
                 if gitee_updated_since:
-                    updated_since = get_time_diff_days(gitee_updated_since[0]['_source']["metadata__updated_on"], str(date))
+                    updated_since = get_time_diff_months(gitee_updated_since[0]['_source']["metadata__updated_on"], str(date))
                     
                 else:
                     continue
@@ -642,9 +640,9 @@ class GiteeEnrich(Enrich):
                     'repo':repository_url,                 
                     'created_since':created_since,
                     'updated_since':updated_since,
-                    'commit_frequency':commit_frequency,
+                    'commit_frequency':'%.4f' %commit_frequency,
                     'countributor_count':countributor_count,
-                    'code_review_count': '%.3f' % code_review_count,
+                    'code_review_count': '%.4f' % code_review_count,
                     'updated_issues_count':updated_issues_count,
                     'closed_issue_count':issue_closed,
                     'comment_frequency':comment_frequency,
@@ -815,3 +813,20 @@ class GiteeEnrich(Enrich):
         }
         """%(field, repo_url, from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
         return query
+
+def get_time_diff_months(start, end):
+    ''' Number of months between two dates in UTC format  '''
+
+    if start is None or end is None:
+        return None
+
+    if type(start) is not datetime:
+        start = str_to_datetime(start).replace(tzinfo=None)
+    if type(end) is not datetime:
+        end = str_to_datetime(end).replace(tzinfo=None)
+
+    seconds_month = float(60 * 60 * 24 * 30)
+    diff_months = (end - start).total_seconds() / seconds_month
+    diff_months = float('%.2f' % diff_months)
+
+    return diff_months
