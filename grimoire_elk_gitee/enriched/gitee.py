@@ -21,7 +21,7 @@
 
 import logging
 import re
-import time
+import math
 
 import requests
 
@@ -50,6 +50,38 @@ from perceval.backend import uuid
 GITEE = 'https://gitee.com/'
 GITEE_ISSUES = "gitee_issues"
 GITEE_MERGES = "gitee_pulls"
+
+# Weights for various parameters.
+CODE_REVIEW_COUNT_WEIGHT = 1
+CREATED_SINCE_WEIGHT = 1
+UPDATED_SINCE_WEIGHT = -1
+CONTRIBUTOR_COUNT_WEIGHT = 2
+ORG_COUNT_WEIGHT = 1
+COMMIT_FREQUENCY_WEIGHT = 1
+RECENT_RELEASES_WEIGHT = 0.5
+CLOSED_ISSUES_WEIGHT = 0.5
+UPDATED_ISSUES_WEIGHT = 0.5
+COMMENT_FREQUENCY_WEIGHT = 1
+DEPENDENTS_COUNT_WEIGHT = 2
+
+# Max thresholds for various parameters.
+CODE_REVIEW_COUNT_THRESHOLD = 15
+CREATED_SINCE_THRESHOLD = 120
+UPDATED_SINCE_THRESHOLD = 120
+CONTRIBUTOR_COUNT_THRESHOLD = 5000
+ORG_COUNT_THRESHOLD = 10
+COMMIT_FREQUENCY_THRESHOLD = 1000
+RECENT_RELEASES_THRESHOLD = 26
+CLOSED_ISSUES_THRESHOLD = 5000
+UPDATED_ISSUES_THRESHOLD = 5000
+COMMENT_FREQUENCY_THRESHOLD = 15
+DEPENDENTS_COUNT_THRESHOLD = 500000
+
+# Others.
+TOP_CONTRIBUTOR_COUNT = 15
+ISSUE_LOOKBACK_DAYS = 90
+RELEASE_LOOKBACK_DAYS = 365
+FAIL_RETRIES = 7
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +216,17 @@ class GiteeEnrich(Enrich):
                     if item['user']['login'] != comment['user']['login'] \
                     and not (comment['user']['name'].endswith("bot"))]
         return len(comments)
+    
+    def get_num_of_review_comments_without_bot(self, item):
+        """Get the num of comment was made to the pr by someone
+        other than the user who created the pr and bot
+        """
+        comments = [comment for comment in item["review_comments_data"]
+                    if item['user']['login'] != comment['user']['login'] \
+                    and not (comment['user']['name'].endswith("bot"))]
+        return len(comments)
+    
+    
 
     #get first attendtion without bot
     def get_time_to_first_attention_without_bot(self, item):
@@ -233,8 +276,7 @@ class GiteeEnrich(Enrich):
         return len(set(commenters))
 
     def get_CVE_message(self, item):
-        """Get the first date at which a comment was made to the issue by someone
-        other than the user who created the issue and bot
+        """Get CVE issues
         """
         if item["body"] and "漏洞公开时间" in item["body"]:
             issue_body = item["body"].splitlines()
@@ -354,6 +396,7 @@ class GiteeEnrich(Enrich):
         rich_pr['forks'] = None
         rich_pr['code_merge_duration'] = get_time_diff_days(pull_request['created_at'],
                                                             pull_request['merged_at'])
+        rich_pr['num_review_comments_without_bot'] = self.get_num_of_review_comments_without_bot(pull_request)
         rich_pr['num_review_comments'] = len(pull_request['review_comments_data'])
 
         rich_pr['time_to_merge_request_response'] = None
@@ -575,36 +618,48 @@ class GiteeEnrich(Enrich):
 
         num_items = 0
         ins_items = 0
+        total_weight = (CODE_REVIEW_COUNT_WEIGHT+ CREATED_SINCE_WEIGHT + UPDATED_SINCE_WEIGHT +
+                    CONTRIBUTOR_COUNT_WEIGHT + 
+                    COMMIT_FREQUENCY_WEIGHT + 
+                    CLOSED_ISSUES_WEIGHT + UPDATED_ISSUES_WEIGHT +
+                    COMMENT_FREQUENCY_WEIGHT )
 
         # iterate over the repositories
         for repository_url in repositories:
             logger.debug("[enrich-activity] Start analysis for {}".format(repository_url))
             dates_list = self.get_date_list(datetime_to_utc(str_to_datetime(from_date)),datetime_to_utc(str_to_datetime(end_date)))
             activity_datas = []
+            # creation_since = 0
        
             query_created_since = self.get_created_since_query(repository_url)
             gitee_create_since = es_in.search(index=gitee_repositories_raw_index, body=query_created_since)['hits']['hits']
             query_first_commit_since = self.get_created_since_query(repository_url+".git", order="asc")
             first_commit_since= es_in.search(index=git_demo_enriched_index, body=query_first_commit_since)['hits']['hits']
-            
-            creation_since = min(gitee_create_since[0]['_source']['data']["created_at"], first_commit_since[0]['_source']["metadata__updated_on"])
-           
+            if gitee_create_since and first_commit_since:
+                creation_since = min(gitee_create_since[0]['_source']['data']["created_at"], first_commit_since[0]['_source']["metadata__updated_on"])
+            elif not first_commit_since and gitee_create_since:
+                creation_since = gitee_create_since[0]['_source']['data']["created_at"]
+            elif not gitee_create_since and first_commit_since:
+                creation_since = first_commit_since[0]['_source']["metadata__updated_on"]
+            else:
+                continue
+
             for date in dates_list:
                 uuid_date = uuid(repository_url, str(date))             
-                query_code_review_count = self.get_data_before_dates(repository_url, date)
-                gitee_pr = es_in.search(index=gitee_pulls_enriched_index, body=query_code_review_count)['hits']
-                gitee_issue = es_in.search(index=gitee_issues_enrich_index, body=query_code_review_count)['hits']
+                query_code_review_count =self.get_uuid_count("sum",repository_url, "num_review_comments_without_bot", to_date=date)
+                gitee_pr = es_in.search(index=gitee_pulls_enriched_index, body=query_code_review_count)
+                query_issue_comments_count = self.get_uuid_count("sum",repository_url, "num_of_comments_without_bot", to_date=date)
+                gitee_issue = es_in.search(index=gitee_issues_enrich_index, body=query_issue_comments_count)
                 try:
-                    code_review_count = sum(gitee_ipr['_source']['num_review_comments'] for gitee_ipr in gitee_pr['hits'] )/gitee_pr["total"]["value"] 
+                    print(gitee_pr['aggregations']["count_of_uuid"]['value'])
+                    print(gitee_pr["hits"]["total"]["value"])
+                    print(date)
+                    code_review_count = gitee_pr['aggregations']["count_of_uuid"]['value']/gitee_pr["hits"]["total"]["value"]
                 except ZeroDivisionError:
                     code_review_count = 0               
                 try:
-                    issue_comments = 0
-                    for gitee_iissue in gitee_issue['hits']:
-                        if 'num_of_comments_without_bot' in gitee_iissue['_source']:
-                            issue_comments += gitee_iissue['_source']['num_of_comments_without_bot']
-                                                       
-                    comment_frequency = issue_comments/gitee_issue["total"]["value"]
+                                                               
+                    comment_frequency = gitee_issue['aggregations']["count_of_uuid"]['value']/gitee_issue["hits"]["total"]["value"]
                 except ZeroDivisionError:
                     comment_frequency = 0
                  
@@ -613,31 +668,50 @@ class GiteeEnrich(Enrich):
                 
                 created_since = get_time_diff_months(creation_since, str(date))
                 
-                query_author_uuid_data = self.get_uuid_count(repository_url, "author_uuid", to_date=date)
+                query_author_uuid_data = self.get_uuid_count("cardinality",repository_url, "author_uuid", to_date=date)
                 author_uuid_count = es_in.search(index=(git_demo_enriched_index,gitee_pulls_enriched_index,gitee_issues_enrich_index), body=query_author_uuid_data)['aggregations']["count_of_uuid"]['value']
-                query_assignee_uuid_data = self.get_uuid_count(repository_url, "assignee_data_uuid", to_date=date)
+                query_assignee_uuid_data = self.get_uuid_count("cardinality", repository_url, "assignee_data_uuid", to_date=date)
                 assignee_data_uuid_count = es_in.search(index=gitee_issues_enrich_index, body=query_assignee_uuid_data)['aggregations']["count_of_uuid"]['value']
-                query_merge_uuid_data = self.get_uuid_count(gitee_pulls_enriched_index, "merge_author_login", to_date=date)
+                query_merge_uuid_data = self.get_uuid_count("cardinality", repository_url,"merge_author_login", to_date=date)
                 merge_login_count = es_in.search(index=gitee_issues_enrich_index, body=query_merge_uuid_data)['aggregations']["count_of_uuid"]['value']
                 countributor_count = author_uuid_count+assignee_data_uuid_count+merge_login_count
 
                 query_issue_closed = self.get_issue_closes_uuid_count(repository_url, "uuid", from_date=(date - timedelta(days = 90)), to_date=date)
                 issue_closed = es_in.search(index=gitee_issues_enrich_index, body=query_issue_closed)['aggregations']["count_of_uuid"]['value']
 
-                query_issue_updated_since = self.get_uuid_count(repository_url, "uuid", from_date=(date - timedelta(days = 90)),to_date=date)
+                query_issue_updated_since = self.get_uuid_count("cardinality",repository_url, "uuid", from_date=(date - timedelta(days = 90)),to_date=date)
                 updated_issues_count = es_in.search(index=gitee_issues_enrich_index, body=query_issue_updated_since)['aggregations']["count_of_uuid"]['value']
 
-                query_git_commit = self.get_uuid_count(repository_url, "uuid", from_date=date-timedelta(days=365), to_date=date)
+                query_git_commit = self.get_uuid_count("cardinality",repository_url, "hash", from_date=date-timedelta(days=365), to_date=date)
                 commit_frequency = es_in.search(index=git_demo_enriched_index, body=query_git_commit)['aggregations']["count_of_uuid"]['value']/52
                 
-                if gitee_updated_since:
+                if gitee_updated_since and created_since>=0:
                     updated_since = get_time_diff_months(gitee_updated_since[0]['_source']["metadata__updated_on"], str(date))
                     
                 else:
                     continue
+                criticality_score = round(
+                    ((get_param_score(created_since,
+                                    CREATED_SINCE_THRESHOLD, CREATED_SINCE_WEIGHT)) +
+                    (get_param_score(updated_since,
+                                    UPDATED_SINCE_THRESHOLD, UPDATED_SINCE_WEIGHT)) +
+                    (get_param_score(countributor_count,
+                                    CONTRIBUTOR_COUNT_THRESHOLD,
+                                    CONTRIBUTOR_COUNT_WEIGHT)) +                   
+                    (get_param_score(commit_frequency,
+                                    COMMIT_FREQUENCY_THRESHOLD,
+                                    COMMIT_FREQUENCY_WEIGHT)) +                
+                    (get_param_score(issue_closed,
+                                    CLOSED_ISSUES_THRESHOLD, CLOSED_ISSUES_WEIGHT)) +
+                    (get_param_score(updated_issues_count,
+                                    UPDATED_ISSUES_THRESHOLD, UPDATED_ISSUES_WEIGHT)) +
+                    (get_param_score(
+                        comment_frequency, COMMENT_FREQUENCY_THRESHOLD,
+                        COMMENT_FREQUENCY_WEIGHT)) ) /
+                    total_weight, 5)
                 activity_data = {
                     'uuid': uuid_date,
-                    'repo':repository_url,                 
+                    'tag':repository_url,                 
                     'created_since':created_since,
                     'updated_since':updated_since,
                     'commit_frequency':'%.4f' %commit_frequency,
@@ -646,12 +720,13 @@ class GiteeEnrich(Enrich):
                     'updated_issues_count':updated_issues_count,
                     'closed_issue_count':issue_closed,
                     'comment_frequency':comment_frequency,
+                    'criticality_score':criticality_score,
                     'grimoire_creation_date': date.isoformat(),                                  
                     'metadata__enriched_on': datetime_utcnow().isoformat()
                 }
                
-                if created_since>0:
-                    activity_datas.append(activity_data)
+                
+                activity_datas.append(activity_data)
                 if len(activity_datas) >= self.elastic.max_items_bulk:
                         num_items += len(activity_datas)
                         ins_items += es_out.bulk_upload(activity_datas, "uuid")
@@ -670,6 +745,7 @@ class GiteeEnrich(Enrich):
     def get_data_before_dates(self, repository_url, date):
         query = """
         {
+            "size" : 10000,
             "query": {
                 "bool": {
                     "filter": [
@@ -714,6 +790,7 @@ class GiteeEnrich(Enrich):
     def get_updated_since_query(self, repository_url, date):
         query = """
       {
+          "track_total_hits":true,
             "query": {
                 "bool": {
                     "filter": [
@@ -741,13 +818,14 @@ class GiteeEnrich(Enrich):
         """ % (repository_url, date.strftime("%Y-%m-%d"))
         return query
 
-    def get_uuid_count(self, repo_url, field, from_date=str_to_datetime("1970-01-01"), to_date= datetime_utcnow()):
+    def get_uuid_count(self, option, repo_url, field, from_date=str_to_datetime("1970-01-01"), to_date= datetime_utcnow()):
         query = """
             {
                 "size" : 0,
+                "track_total_hits":true,
                 "aggs" : {
                     "count_of_uuid" : {
-                        "cardinality" : {
+                        "%s" : {
                         "field" : "%s"
                         }
                     }
@@ -769,7 +847,7 @@ class GiteeEnrich(Enrich):
             }
                 
             }
-        """% (field, repo_url, from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
+        """% (option, field, repo_url, from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
            
         return query
 
@@ -777,6 +855,7 @@ class GiteeEnrich(Enrich):
         query = """
         {
         "size": 0,
+        "track_total_hits":true,
         "aggs": {
             "count_of_uuid": {
             "cardinality": {
@@ -830,3 +909,8 @@ def get_time_diff_months(start, end):
     diff_months = float('%.2f' % diff_months)
 
     return diff_months
+
+def get_param_score(param, max_value, weight=1):
+    """Return paramater score given its current value, max value and
+    parameter weight."""
+    return (math.log(1 + param) / math.log(1 + max(param, max_value))) * weight
