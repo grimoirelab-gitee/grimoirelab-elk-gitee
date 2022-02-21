@@ -670,11 +670,12 @@ class GiteeEnrich(Enrich):
                 
                 query_author_uuid_data = self.get_uuid_count("cardinality",repository_url, "author_uuid", to_date=date)
                 author_uuid_count = es_in.search(index=(git_demo_enriched_index,gitee_pulls_enriched_index,gitee_issues_enrich_index), body=query_author_uuid_data)['aggregations']["count_of_uuid"]['value']
-                query_assignee_uuid_data = self.get_uuid_count("cardinality", repository_url, "assignee_data_uuid", to_date=date)
-                assignee_data_uuid_count = es_in.search(index=gitee_issues_enrich_index, body=query_assignee_uuid_data)['aggregations']["count_of_uuid"]['value']
+                # query_assignee_uuid_data = self.get_uuid_count("cardinality", repository_url, "assignee_data_uuid", to_date=date)
+                # assignee_data_uuid_count = es_in.search(index=gitee_issues_enrich_index, body=query_assignee_uuid_data)['aggregations']["count_of_uuid"]['value']
                 query_merge_uuid_data = self.get_uuid_count("cardinality", repository_url,"merge_author_login", to_date=date)
                 merge_login_count = es_in.search(index=gitee_issues_enrich_index, body=query_merge_uuid_data)['aggregations']["count_of_uuid"]['value']
-                countributor_count = author_uuid_count+assignee_data_uuid_count+merge_login_count
+                # countributor_count = author_uuid_count+assignee_data_uuid_count+merge_login_count
+                countributor_count = author_uuid_count + merge_login_count
 
                 query_issue_closed = self.get_issue_closes_uuid_count(repository_url, "uuid", from_date=(date - timedelta(days = 90)), to_date=date)
                 issue_closed = es_in.search(index=gitee_issues_enrich_index, body=query_issue_closed)['aggregations']["count_of_uuid"]['value']
@@ -731,9 +732,9 @@ class GiteeEnrich(Enrich):
                         num_items += len(activity_datas)
                         ins_items += es_out.bulk_upload(activity_datas, "uuid")
                         activity_datas = []
-        if len(activity_datas) > 0:
-            num_items += len(activity_datas)
-            ins_items += es_out.bulk_upload(activity_datas, "uuid")
+            if len(activity_datas) > 0:
+                num_items += len(activity_datas)
+                ins_items += es_out.bulk_upload(activity_datas, "uuid")
         
 
         logger.info("[enrich-forecast-activity] End study")
