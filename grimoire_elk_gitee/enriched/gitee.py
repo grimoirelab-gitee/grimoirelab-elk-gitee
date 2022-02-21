@@ -610,8 +610,7 @@ class GiteeEnrich(Enrich):
             body=get_unique_repository())
 
         repositories = [repo['key'] for repo in unique_repos['aggregations']['unique_repos'].get('buckets', [])]
-        # current_month = datetime_utcnow().replace(day=1, hour=0, minute=0, second=0)
-
+       
         logger.info("[enrich-activity] {} repositories to process".format(len(repositories)))
         es_out = ElasticSearch(enrich_backend.elastic.url, out_index)
         es_out.add_alias("activity_study")
@@ -629,7 +628,6 @@ class GiteeEnrich(Enrich):
             logger.debug("[enrich-activity] Start analysis for {}".format(repository_url))
             dates_list = self.get_date_list(datetime_to_utc(str_to_datetime(from_date)),datetime_to_utc(str_to_datetime(end_date)))
             activity_datas = []
-            # creation_since = 0
        
             query_created_since = self.get_created_since_query(repository_url)
             gitee_create_since = es_in.search(index=gitee_repositories_raw_index, body=query_created_since)['hits']['hits']
@@ -651,18 +649,14 @@ class GiteeEnrich(Enrich):
                 query_issue_comments_count = self.get_uuid_count("sum",repository_url, "num_of_comments_without_bot", to_date=date)
                 gitee_issue = es_in.search(index=gitee_issues_enrich_index, body=query_issue_comments_count)
                 try:
-                    print(gitee_pr['aggregations']["count_of_uuid"]['value'])
-                    print(gitee_pr["hits"]["total"]["value"])
-                    print(date)
                     code_review_count = gitee_pr['aggregations']["count_of_uuid"]['value']/gitee_pr["hits"]["total"]["value"]
                 except ZeroDivisionError:
                     code_review_count = 0               
-                try:
-                                                               
+                try:                                               
                     comment_frequency = gitee_issue['aggregations']["count_of_uuid"]['value']/gitee_issue["hits"]["total"]["value"]
                 except ZeroDivisionError:
                     comment_frequency = 0
-                 
+                
                 query_updated_since = self.get_updated_since_query(repository_url+'.git', date)
                 gitee_updated_since = es_in.search(index=git_demo_enriched_index, body=query_updated_since)['hits']['hits']
                 
@@ -670,11 +664,8 @@ class GiteeEnrich(Enrich):
                 
                 query_author_uuid_data = self.get_uuid_count("cardinality",repository_url, "author_uuid", to_date=date)
                 author_uuid_count = es_in.search(index=(git_demo_enriched_index,gitee_pulls_enriched_index,gitee_issues_enrich_index), body=query_author_uuid_data)['aggregations']["count_of_uuid"]['value']
-                # query_assignee_uuid_data = self.get_uuid_count("cardinality", repository_url, "assignee_data_uuid", to_date=date)
-                # assignee_data_uuid_count = es_in.search(index=gitee_issues_enrich_index, body=query_assignee_uuid_data)['aggregations']["count_of_uuid"]['value']
                 query_merge_uuid_data = self.get_uuid_count("cardinality", repository_url,"merge_author_login", to_date=date)
                 merge_login_count = es_in.search(index=gitee_issues_enrich_index, body=query_merge_uuid_data)['aggregations']["count_of_uuid"]['value']
-                # countributor_count = author_uuid_count+assignee_data_uuid_count+merge_login_count
                 countributor_count = author_uuid_count + merge_login_count
 
                 query_issue_closed = self.get_issue_closes_uuid_count(repository_url, "uuid", from_date=(date - timedelta(days = 90)), to_date=date)
