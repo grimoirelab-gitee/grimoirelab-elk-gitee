@@ -684,6 +684,8 @@ class GiteeEnrich(Enrich):
                     continue
                 criticality_score = round(
                     ((get_param_score(created_since,
+                                    CODE_REVIEW_COUNT_THRESHOLD , CODE_REVIEW_COUNT_WEIGHT)) +
+                    (get_param_score(created_since,
                                     CREATED_SINCE_THRESHOLD, CREATED_SINCE_WEIGHT)) +
                     (get_param_score(updated_since,
                                     UPDATED_SINCE_THRESHOLD, UPDATED_SINCE_WEIGHT)) +
