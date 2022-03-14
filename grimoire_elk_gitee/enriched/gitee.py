@@ -22,6 +22,7 @@
 import logging
 import re
 import math
+import json
 
 import requests
 
@@ -47,6 +48,9 @@ from grimoire_elk.enriched.graal_study_evolution import (get_to_date,
 from perceval.backend import uuid
 
 
+
+
+
 GITEE = 'https://gitee.com/'
 GITEE_ISSUES = "gitee_issues"
 GITEE_MERGES = "gitee_pulls"
@@ -67,7 +71,7 @@ MEETING_ACTIVITY = 0.01302
 MEETING_ATTENDEE_COUNT_ACTIVITY = 0.01120
 
 LOC_FREQUENCY_WEIGHT_CODE = 0.02296
-COMMIT_FEQUENCY_WEIGHT_CODE = 0.19854
+COMMIT_FREQUENCY_WEIGHT_CODE = 0.19854
 IS_MAINTAINED_WEIGHT_CODE = 0.14884
 CONTRIBUTOR_COUNT_WEIGHT_CODE = 0.12940
 CODE_REVIREW_WEIGHT_CODE = 0.08378
@@ -75,24 +79,46 @@ CI_TEST_WEIGHT_CODE = 0.13694
 DOWNLOAD_COUT_FREQUENCE_WEIGHT_CODE = 0.20791
 FORK_COUNT_FEQUENCY_WEIGHT_CODE = 0.07164
 
-ISSUE_FIRST_RESPONSE = 0.17824
-CLOSED_ISSUES_TIME = 0.16228
-ISSUE_OPEN_TIME = 0.16228
-CI_BUILD_TIME = 0.05126
-CLOSED_PR_TIME = 0.131
+ISSUE_FIRST_RESPONSE_WEIGHT_COMMUNITY = 0.17824
+CLOSED_ISSUES_TIME_WEIGHT_COMMUNITY = 0.16228
+ISSUE_OPEN_TIME_WEIGHT_COMMUNITY = 0.16228
+CI_BUILD_TIME_WEIGHT_COMMUNITY = 0.05126
+CLOSED_PR_TIME_WEIGHT_COMMUNITY = 0.13196
+PR_OPEN_TIME_WEIGHT_COMMUNITY = 0.11169
+MAIL_THREAD_OUT_WEIGHT_COMMUNITY = 0.05948
+EVENT_COUNT_WEIGHT_COMMUNITY = 0.14281
 
 # Max thresholds for various parameters.
-CODE_REVIEW_COUNT_THRESHOLD = 15
-CREATED_SINCE_THRESHOLD = 120
-UPDATED_SINCE_THRESHOLD = 120
-CONTRIBUTOR_COUNT_THRESHOLD = 5000
-ORG_COUNT_THRESHOLD = 10
-COMMIT_FREQUENCY_THRESHOLD = 1000
-RECENT_RELEASES_THRESHOLD = 26
-CLOSED_ISSUES_THRESHOLD = 5000
-UPDATED_ISSUES_THRESHOLD = 5000
-COMMENT_FREQUENCY_THRESHOLD = 15
-DEPENDENTS_COUNT_THRESHOLD = 500000
+CODE_REVIEW_COUNT_THRESHOLD_ACTIVITY = 15
+CREATED_SINCE_THRESHOLD_ACTIVITY = 120
+UPDATED_SINCE_THRESHOLD_ACTIVITY = 120
+CONTRIBUTOR_COUNT_THRESHOLD_ACTIVITY = 5000
+ORG_COUNT_THRESHOLD_ACTIVITY = 10
+COMMIT_FREQUENCY_THRESHOLD_ACTIVITY = 1000
+RECENT_RELEASES_THRESHOLD_ACTIVITY = 26
+CLOSED_ISSUES_THRESHOLD_ACTIVITY = 5000
+UPDATED_ISSUES_THRESHOLD_ACTIVITY = 5000
+COMMENT_FREQUENCY_THRESHOLD_ACTIVITY = 15
+DEPENDENTS_COUNT_THRESHOLD_ACTIVITY = 500000
+
+LOC_FREQUENCY_THRESHOLD_CODE = 6000
+COMMIT_FREQUENCY_THRESHOLD_CODE = 1000
+IS_MAINTAINED_THRESHOLD_CODE = 10
+CONTRIBUTOR_COUNT_THRESHOLD_CODE = 5000
+CODE_REVIREW_THRESHOLD_CODE = 10
+CI_TEST_THRESHOLD_CODE = 10
+DOWNLOAD_COUT_FREQUENCE_THRESHOLD_CODE = 0 #TODO 0 is tmp
+FORK_COUNT_FEQUENCY_THRESHOLD_CODE = 1000
+
+ISSUE_FIRST_RESPONSE_THRESHOLD_COMMUNITY = 90
+CLOSED_ISSUES_TIME_THRESHOLD_COMMUNITY = 90
+ISSUE_OPEN_TIME_THRESHOLD_COMMUNITY = 90
+CI_BUILD_TIME_THRESHOLD_COMMUNITY = 0
+PR_FIRST_RESPONSE_THRESHOLD_COMMUNITY = 90
+CLOSED_PR_TIME_THRESHOLD_COMMUNITY = 90
+PR_OPEN_TIME_THRESHOLD_COMMUNITY = 90
+MAIL_THREAD_OUT_THRESHOLD_COMMUNITY = 0
+EVENT_COUNT_THRESHOLD_COMMUNITY = 0
 
 # Others.
 TOP_CONTRIBUTOR_COUNT = 15
@@ -100,11 +126,7 @@ ISSUE_LOOKBACK_DAYS = 90
 RELEASE_LOOKBACK_DAYS = 365
 FAIL_RETRIES = 7
 
-total_weight = (CODE_REVIEW_COUNT_WEIGHT_ACTIVITY + CREATED_SINCE_WEIGHT_ACTIVITY + UPDATED_SINCE_WEIGHT_ACTIVITY +
-                            CONTRIBUTOR_COUNT_WEIGHT_ACTIVITY + 
-                            COMMIT_FREQUENCY_WEIGHT_ACTIVITY + 
-                            CLOSED_ISSUES_WEIGHT_ACTIVITY + UPDATED_ISSUES_WEIGHT_ACTIVITY +
-                            COMMENT_FREQUENCY_WEIGHT_ACTIVITY )
+
 
 logger = logging.getLogger(__name__)
 
@@ -633,23 +655,44 @@ class GiteeEnrich(Enrich):
         #     body=get_unique_repository())
 
         # repositories = [repo['key'] for repo in unique_repos['aggregations']['unique_repos'].get('buckets', [])]
-        map_json = self.json_projects()
-        logger.info("[enrich-activity] {} repositories to process".format(len(repositories)))
+        map_json = self.json_projects
+        # logger.info("[enrich-activity] {} repositories to process".format(len(repositories)))
         es_out = ElasticSearch(enrich_backend.elastic.url, out_index)
         es_out.add_alias("activity_study")
         allrepo = []
-        for project in map_json:
-            repos = []
-            for repo in map_json[project]:           
-                items = repo.get('gitee:repo')
-                if items:
-                    repos.extend(items)
-            repositories = repos
-            num_items = 0
-            ins_items = 0
-            allrepo.append(repos)
+        
+        for project in map_json :
+            if 'gitee:repo' in map_json[project]:
+                for item in map_json[project]['gitee:repo'] :           
+                    # items = map_json[project][repo]['gitee:repo']
+                    # for item in items:
+                    if 'src-openeuler' in item:
+                        allrepo.append(item)
+        dates_list = self.get_date_list(datetime_to_utc(str_to_datetime(from_date)),datetime_to_utc(str_to_datetime(end_date)))
+        for date in dates_list:
+            creation_since_com = []
+            updated_since_com = []
+            countributor_count_com = 0
+            commit_frequency_com = 0
+            gitee_pr_count_com = 0
+            code_review_count_com = 0
+            issue_closed_com = 0
+            updated_issues_count_com = 0
+            gitee_issue_comment_count_com = 0
+            gitee_issue_count_com = 0
+            LOC_frequency_com = 0   
+            is_maintained_com = False 
+        
+            for project in map_json:
+                repos = []
+                if 'gitee:repo' in map_json[project]:
+                    for item in map_json[project]['gitee:repo'] :           
+                        if 'src-openeuler' in item:
+                            repos.append(item)
+                repositories = repos
+                num_items = 0
+                ins_items = 0         
             
-            for date in dates_list:
             # iterate over the repositories
                 creation_since_sig = []
                 updated_since_sig = []
@@ -661,11 +704,11 @@ class GiteeEnrich(Enrich):
                 updated_issues_count_sig = 0
                 gitee_issue_comment_count_sig = 0
                 gitee_issue_count_sig = 0
-                LOC_frequency_sig = 0              
+                LOC_frequency_sig = 0     
+                is_maintained_sig = True         
 
                 for repository_url in repositories:
                     logger.debug("[enrich-activity] Start analysis for {}".format(repository_url))
-                    dates_list = self.get_date_list(datetime_to_utc(str_to_datetime(from_date)),datetime_to_utc(str_to_datetime(end_date)))
                     activity_datas = []
                     
                     query_created_since = self.get_created_since_query(repository_url)
@@ -681,7 +724,7 @@ class GiteeEnrich(Enrich):
                     else:
                         continue
                     creation_since_sig.append(creation_since)
-            
+                             
                     uuid_date = uuid(repository_url, str(date))             
                     query_code_review_count =self.get_uuid_count("sum",repository_url, "num_review_comments_without_bot", to_date=date)
                     gitee_pr = es_in.search(index=gitee_pulls_enriched_index, body=query_code_review_count)
@@ -712,7 +755,7 @@ class GiteeEnrich(Enrich):
                     countributor_count = author_uuid_count + merge_login_count
                     countributor_count_sig += countributor_count
 
-                    query_issue_closed = self.get_issue_closes_uuid_count(repository_url, "uuid", from_date=(date - timedelta(days = 90)), to_date=date)
+                    query_issue_closed = self.get_issue_closes_uuid_count("cardinality",repository_url, "uuid", from_date=(date - timedelta(days = 90)), to_date=date)
                     issue_closed = es_in.search(index=gitee_issues_enrich_index, body=query_issue_closed)['aggregations']["count_of_uuid"]['value']
                     issue_closed_sig += issue_closed
 
@@ -728,29 +771,34 @@ class GiteeEnrich(Enrich):
                     LOC_frequency_sig += LOC_frequency
                     dates_90_list = self.get_date_list(datetime_to_utc(date-timedelta(days=90)),datetime_to_utc(date))
                     
-                    query_issue_first_reponse_avg = self.get_uuid_count("avg",repo, "time_to_first_attention", "component","grimoire_creation_date",from_date=date-timedelta(days=90), to_date=date)
+                    query_issue_first_reponse_avg = self.get_uuid_count("avg",repository_url, "time_to_first_attention",from_date=date-timedelta(days=90), to_date=date)
                     issue_first_reponse_avg = es_in.search(index=gitee_issues_enrich_index, body=query_issue_first_reponse_avg)['aggregations']["count_of_uuid"]['value']
-                    query_issue_first_reponse_mid = self.get_uuid_count("percentiles",repo, "time_to_first_attention", "component","grimoire_creation_date",from_date=date-timedelta(days=90), to_date=date)
-                    query_issue_first_reponse_mid["aggs"]["percentiles"]["percents"] = [50]
-                    issue_first_reponse_mid = es_in.search(index=gitee_issues_enrich_index, body=query_issue_first_reponse_mid)['aggregations']["count_of_uuid"]['value']
-                
-                    query_closed_issue_time_avg = self.get_issue_closes_uuid_count("avg",repo, "time_open_days", from_date=(date - timedelta(days = 90)), to_date=date)
+                    query_issue_first_reponse_mid = self.get_uuid_count("percentiles",repository_url, "time_to_first_attention", from_date=date-timedelta(days=90), to_date=date)
+                    
+                    
+                    query_issue_first_reponse_mid["aggs"]["count_of_uuid"]["percentiles"]["percents"] = [50]
+                    issue_first_reponse_mid = es_in.search(index=gitee_issues_enrich_index, body=query_issue_first_reponse_mid)['aggregations']["count_of_uuid"]['values']['50.0']
+                   
+                    query_closed_issue_time_avg = self.get_issue_closes_uuid_count("avg",repository_url, "time_open_days", from_date=(date - timedelta(days = 90)), to_date=date)
                     closed_issue_time_avg = es_in.search(index=gitee_issues_enrich_index, body=query_closed_issue_time_avg)['aggregations']["count_of_uuid"]['value']
-                    query_closed_issue_time_mid = self.get_issue_closes_uuid_count("percentiles",repo, "time_open_days", from_date=(date - timedelta(days = 90)), to_date=date)
-                    query_closed_issue_time_mid["aggs"]["percentiles"]["percents"] = [50]
-                    closed_issue_time_mid = es_in.search(index=gitee_issues_enrich_index, body=query_closed_issue_time_mid)['aggregations']["count_of_uuid"]['value']
+                    
+                    query_closed_issue_time_mid = self.get_issue_closes_uuid_count("percentiles",repository_url, "time_open_days", from_date=(date - timedelta(days = 90)), to_date=date)
+                    query_closed_issue_time_mid["aggs"]["count_of_uuid"]["percentiles"]["percents"] = [50]
+                    closed_issue_time_mid = es_in.search(index=gitee_issues_enrich_index, body=query_closed_issue_time_mid)['aggregations']["count_of_uuid"]['values']['50.0']
 
                     is_maintained = True
                     for i in dates_90_list:
-                        query_git_commit_i = self.get_uuid_count("cardinality",repository_url, "hash",from_date=date-timedelta(days=7), to_date=i)
+                        query_git_commit_i = self.get_uuid_count("cardinality",repository_url, "hash",from_date=i-timedelta(days=7), to_date=i)
                         commit_frequency_i =  es_in.search(index=git_demo_enriched_index, body=query_git_commit_i)['aggregations']["count_of_uuid"]['value']/52
-                        if  commit_frequency_i ==0:
+                        if  commit_frequency_i==0:
                             is_maintained = False 
+                            is_maintained_sig = False
+                            is_maintained_com = False
                             break
                     
                     if gitee_updated_since and created_since>=0:
                         updated_since = get_time_diff_months(gitee_updated_since[0]['_source']["metadata__updated_on"], str(date))
-                        updated_since_sig.append(updated_since_sig)
+                        updated_since_sig.append(gitee_updated_since[0]['_source']["metadata__updated_on"])
                     else:
                         continue
                     
@@ -761,15 +809,16 @@ class GiteeEnrich(Enrich):
                         'level': "repo",               
                         'created_since':created_since,
                         'updated_since':updated_since,
-                        'commit_frequency':'%.4f' %commit_frequency/52,
+                        'commit_frequency':float('%.4f'%int(commit_frequency))/52,
                         'countributor_count':countributor_count,
-                        'code_review_count': '%.4f' % code_review_count,
+                        'code_review_count': float('%.4f'% code_review_count),
                         'updated_issues_count':updated_issues_count,
                         'closed_issue_count':issue_closed,
                         'comment_frequency':comment_frequency,
                         'LOC_frequency': LOC_frequency/12,
                         'is_maintained':10 if is_maintained else 0,
                         'code_review':10,
+                        'ci-test':10, 
                         'issue_first_reponse_avg':issue_first_reponse_avg,
                         'issue_first_reponse_mid':issue_first_reponse_mid,
                         'closed_issue_time_avg':closed_issue_time_avg,
@@ -780,6 +829,11 @@ class GiteeEnrich(Enrich):
                     }
                     criticality_score_repo = criticality_score(activity_data)
                     activity_data["criticality_score"] = criticality_score_repo
+                    code_function_quality_repo = code_function_quality(activity_data)
+                    activity_data["code_function_quality_score"] = code_function_quality_repo
+                    community_support_repo = community_support(activity_data)
+                    activity_data["community_support_score"] = community_support_repo
+                    
                                    
                     activity_datas.append(activity_data)
                     if len(activity_datas) >= self.elastic.max_items_bulk:
@@ -788,9 +842,18 @@ class GiteeEnrich(Enrich):
                             activity_datas = []
                 # data for sig
                 uuid_date_sig = uuid(project, str(date))
-                creation_since_sig_data = min(creation_since_sig)
-                updated_since_sig_data = max(updated_since_sig)
-                commit_frequency_sig_data = commit_frequency_sig/52
+                if creation_since_sig:
+                    creation_sig_date = min(creation_since_sig)   
+                    created_since_sig = get_time_diff_months(creation_sig_date,str(date))
+                else:
+                    created_since_sig = -1
+                if updated_since_sig and created_since_sig>=0:
+                    # creation_since_sig_data = min(creation_since_sig)               
+                    updated_since_sig_data = max(updated_since_sig)                
+                    commit_frequency_sig_data = commit_frequency_sig
+                else:
+                    continue
+                
                 
                 del query_issue_first_reponse_avg["query"]["bool"]["must"]
                 query_issue_first_reponse_avg["query"]["bool"]["should"] = [{
@@ -799,47 +862,51 @@ class GiteeEnrich(Enrich):
                 issue_first_reponse_sig_avg =es_in.search(index=gitee_issues_enrich_index, body=query_issue_first_reponse_avg)['aggregations']["count_of_uuid"]['value']
                 
                 del query_issue_first_reponse_mid["query"]["bool"]["must"]
-                query_issue_first_reponse_mid["query"]["bool"]["should"] = [{
+                query_issue_first_reponse_mid["query"]["bool"]["should"]=[{
                     "match_phrase": {
                         "tag": i}} for i in repositories]
-                issue_first_reponse_sig_mid = es_in.search(index=gitee_issues_enrich_index, body=query_issue_first_reponse_mid)['aggregations']["count_of_uuid"]['value']
+                print(query_issue_first_reponse_mid)
+                issue_first_reponse_sig_mid = es_in.search(index=gitee_issues_enrich_index, body=query_issue_first_reponse_mid)['aggregations']["count_of_uuid"]['values']['50.0']
             
                 del query_closed_issue_time_avg["query"]["bool"]["must"]
                 query_closed_issue_time_avg["query"]["bool"]["should"] = [{
                     "match_phrase": {
                         "tag": i}} for i in repositories]
                 # query_closed_issue_time_sig_avg = self.get_issue_closes_uuid_count("avg",repo, "time_open_days", from_date=(date - timedelta(days = 90)), to_date=date)
-                closed_issue_time_sig_avg = es_in.search(index=query_closed_issue_time_avg, body=query_closed_issue_time_avg)['aggregations']["count_of_uuid"]['value']
+                closed_issue_time_sig_avg = es_in.search(index=gitee_issues_enrich_index, body=query_closed_issue_time_avg)['aggregations']["count_of_uuid"]['value']
                 
                 del query_closed_issue_time_mid["query"]["bool"]["must"]
                 query_closed_issue_time_mid["query"]["bool"]["should"] = [{
                     "match_phrase": {
                         "tag": i}} for i in repositories]
-                closed_issue_time_sig_mid = es_in.search(index=gitee_issues_enrich_index, body=query_closed_issue_time_mid)['aggregations']["count_of_uuid"]['value']
-
-
+                closed_issue_time_sig_mid = es_in.search(index=gitee_issues_enrich_index, body=query_closed_issue_time_mid)['aggregations']["count_of_uuid"]['values']['50.0']
 
                 try:
                     code_review_count_sig_data = code_review_count_sig/gitee_pr_count_sig
                 except ZeroDivisionError:
                     code_review_count_sig_data = 0 
                 try:
-                    comment_frequency_sig = gitee_issue_comment_count_sig/gitee_issue_count_sig
+                    comment_frequency_sig_data = gitee_issue_comment_count_sig/gitee_issue_count_sig
                 except ZeroDivisionError:
-                    comment_frequency_sig = 0 
+                    comment_frequency_sig_data = 0 
+                if activity_data["is_maintained"]:
+                    is_maintained_sig = True
                 activity_sig_data = {
                     'uuid': uuid_date_sig,
                     'project': project,
                     'level': "prodject",  
-                    'created_since': get_time_diff_days(creation_since_sig_data,str(date)),
-                    'updated_since': get_time_diff_days(updated_since_sig_data,str(date)),
-                    'commit_frequency': '%.4f' %commit_frequency_sig_data,
+                    'created_since': created_since_sig,
+                    'updated_since': get_time_diff_months(updated_since_sig_data,str(date)),
+                    'commit_frequency': float('%.4f' %commit_frequency_sig_data)/52,
                     'countributor_count': countributor_count_sig,
-                    'code_review_count': '%.4f' % code_review_count_sig_data,
+                    'code_review_count': float('%.4f' % code_review_count_sig_data),
                     'updated_issues_count': updated_issues_count_sig,
                     'closed_issue_count': issue_closed_sig,
-                    'comment_frequency': comment_frequency_sig,
+                    'comment_frequency': comment_frequency_sig_data,
                     'LOC_frequency': LOC_frequency_sig/12,
+                    'is_maintained':10 if is_maintained_sig else 0,
+                    'code_review':10,
+                    'ci-test':10, 
                     'issue_first_reponse_avg':issue_first_reponse_sig_avg,
                     'issue_first_reponse_mid':issue_first_reponse_sig_mid,
                     'closed_issue_time_avg':closed_issue_time_sig_avg,
@@ -848,12 +915,102 @@ class GiteeEnrich(Enrich):
                     'grimoire_creation_date': date.isoformat(),                                  
                     'metadata__enriched_on': datetime_utcnow().isoformat()
                 }
+                criticality_score_sig = criticality_score(activity_sig_data)
+                activity_sig_data["criticality_score"] = criticality_score_sig
+                code_function_quality_sig = code_function_quality(activity_sig_data)
+                activity_sig_data["code_function_quality_score"] = code_function_quality_sig
+                community_support_sig = community_support(activity_sig_data)
+                activity_sig_data["community_support_score"] = community_support_sig
+
                 activity_datas.append(activity_sig_data)
                 if len(activity_datas) > 0:
                     num_items += len(activity_datas)
                     ins_items += es_out.bulk_upload(activity_datas, "uuid")
 
-                
+                creation_since_com.append(creation_sig_date)
+                updated_since_com.append(updated_since_sig_data)
+                commit_frequency_com += commit_frequency_sig
+                countributor_count_com += countributor_count_sig
+                code_review_count_com += code_review_count_sig
+                gitee_pr_count_com += gitee_pr_count_sig
+                updated_issues_count_com += updated_issues_count_sig
+                issue_closed_com += issue_closed_sig
+                gitee_issue_comment_count_com += gitee_issue_comment_count_sig
+                gitee_issue_count_com += gitee_issue_count_sig
+                LOC_frequency_com += LOC_frequency_sig
+            
+            uuid_date_com = uuid("openeuler", str(date))
+            if creation_since_com:
+                creation_since_com_data = min(creation_since_com)               
+            updated_since_com_data = max(updated_since_com)                
+            commit_frequency_com_data = commit_frequency_com/52
+            try:
+                code_review_count_com_data = code_review_count_com/gitee_pr_count_com
+            except ZeroDivisionError:
+                code_review_count_com_data = 0 
+            try:
+                comment_frequency_com_data = gitee_issue_comment_count_sig/gitee_issue_count_sig
+            except ZeroDivisionError:
+                comment_frequency_com_data = 0 
+           
+            query_issue_first_reponse_avg["query"]["bool"]["should"] = [{
+                "match_phrase": {
+                    "tag": i}} for i in allrepo]
+            issue_first_reponse_com_avg =es_in.search(index=gitee_issues_enrich_index, body=query_issue_first_reponse_avg)['aggregations']["count_of_uuid"]['value']
+            
+            query_issue_first_reponse_mid["query"]["bool"]["should"] = [{
+                "match_phrase": {
+                    "tag": i}} for i in allrepo]
+            issue_first_reponse_com_mid = es_in.search(index=gitee_issues_enrich_index, body=query_issue_first_reponse_mid)['aggregations']["count_of_uuid"]['values']['50.0']
+        
+            query_closed_issue_time_avg["query"]["bool"]["should"] = [{
+                "match_phrase": {
+                    "tag": i}} for i in allrepo]
+            # query_closed_issue_time_sig_avg = self.get_issue_closes_uuid_count("avg",repo, "time_open_days", from_date=(date - timedelta(days = 90)), to_date=date)
+            closed_issue_time_com_avg = es_in.search(index=gitee_issues_enrich_index, body=query_closed_issue_time_avg)['aggregations']["count_of_uuid"]['value']
+            
+            query_closed_issue_time_mid["query"]["bool"]["should"] = [{
+                "match_phrase": {
+                    "tag": i}} for i in allrepo]
+            closed_issue_time_com_mid = es_in.search(index=gitee_issues_enrich_index, body=query_closed_issue_time_mid)['aggregations']["count_of_uuid"]['values']['50.0']
+            activity_com_data = {
+                    'uuid': uuid_date_com,                    
+                    'level': "community",  
+                    'created_since': get_time_diff_months(creation_since_com_data,str(date)),
+                    'updated_since': get_time_diff_months(updated_since_com_data,str(date)),
+                    'commit_frequency': float('%.4f' %commit_frequency_com_data),
+                    'countributor_count': countributor_count_com,
+                    'code_review_count': float('%.4f' % code_review_count_com_data),
+                    'updated_issues_count': updated_issues_count_com,
+                    'closed_issue_count': issue_closed_com,
+                    'comment_frequency': comment_frequency_com_data,
+                    'LOC_frequency': LOC_frequency_com/12,
+                    'is_maintained':10 if is_maintained_com else 0,
+                    'code_review':10,
+                    'ci-test':10,
+                    'issue_first_reponse_avg':issue_first_reponse_com_avg,
+                    'issue_first_reponse_mid':issue_first_reponse_com_mid,
+                    'closed_issue_time_avg':closed_issue_time_com_avg,
+                    'closed_issue_time_mid':closed_issue_time_com_mid,
+                    # 'criticality_score': criticality_score,
+                    'grimoire_creation_date': date.isoformat(),                                  
+                    'metadata__enriched_on': datetime_utcnow().isoformat()
+                }
+            criticality_score_com = criticality_score(activity_com_data)
+            activity_data["criticality_score"] = criticality_score_com
+            code_function_quality_com = code_function_quality(activity_com_data)
+            activity_com_data["code_function_quality_score"] = code_function_quality_com
+            community_support_com = community_support(activity_com_data)
+            activity_com_data["community_support_score"] = community_support_com
+
+            # code_function_quality_
+                            
+            activity_datas.append(activity_com_data)
+            if len(activity_datas) >= 0:
+                    num_items += len(activity_datas)
+                    ins_items += es_out.bulk_upload(activity_datas, "uuid")
+                    activity_datas = []
+
         logger.info("[enrich-forecast-activity] End study")
 
     def get_date_list(self, begin_date, end_date):
@@ -937,45 +1094,39 @@ class GiteeEnrich(Enrich):
         return query
 
     def get_uuid_count(self, option, repo_url, field, from_date=str_to_datetime("1970-01-01"), to_date= datetime_utcnow()):
-        query = """
-            {
-                "size" : 0,
-                "track_total_hits":true,
-                "aggs" : {
-                    "count_of_uuid" : {
-                        "%s" : {
-                        "field" : "%s"
-                        }
-                    }
-                },
-                "query": {
-                "bool": { 
-                "must": {
-                "simple_query_string": {
-                        "query": "%s*",
-                        "fields": [
-                            "origin"
-                        ]
-                        }
-            },
-            "filter": {
-                    "range": { "grimoire_creation_date": { "gte": "%s" ,"lt": "%s"}} 
-                    }}        
-            }              
-            }
-        """% (option, field, repo_url, from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
-           
+        # query = """{"size" : 0,"track_total_hits":true,"aggs" : {"count_of_uuid" : {"%s" : {"field" : "%s"}}},"query": {"bool": {"must": { "simple_query_string": { "query": "%s*","fields": ["origin"]}},"filter": {"range": { "grimoire_creation_date": { "gte": "%s" ,"lt": "%s"}} }} } }"""% (option, field, repo_url, from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
+        # query = """{"size" : 0,"track_total_hits":true,"aggs" : {"count_of_uuid" : {"%s" : {"field" : "%s"}}},"query": {"bool": {"must": { "simple_query_string": { "query": "%s*","fields": ["origin"]}},"filter": {"range": { "grimoire_creation_date": { "gte": "%s" ,"lt": "%s"}} }} } }""" % (
+        #     option, field, repo_url, from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
+        query = {
+            "size": 0,
+            "track_total_hits": "true",
+            "aggs": {"count_of_uuid":
+                     {option:
+                      {"field": field}
+                      }
+                     },
+            "query":
+            {"bool":
+             {"must":
+              {"simple_query_string":
+               {"query": repo_url,
+                "fields":
+                ["origin"]}},
+                 "filter":
+                 {"range":
+                  {"grimoire_creation_date":
+                   {"gte": from_date.strftime("%Y-%m-%d"), "lt": to_date.strftime("%Y-%m-%d")}}}}}}
+
         return query
 
-    def get_issue_closes_uuid_count(self, repo_url, field, from_date=str_to_datetime("1970-01-01"), to_date= datetime_utcnow()):
-        query = """
-        {
+    def get_issue_closes_uuid_count(self, option, repo_url, field, from_date=str_to_datetime("1970-01-01"), to_date= datetime_utcnow()):
+        query = {
         "size": 0,
-        "track_total_hits":true,
+        "track_total_hits":True,
         "aggs": {
             "count_of_uuid": {
-            "cardinality": {
-                "field": "%s"
+            option: {
+                "field": field
             }
             }
         },
@@ -983,29 +1134,29 @@ class GiteeEnrich(Enrich):
             "bool": {
             "must": {
                 "simple_query_string": {
-                "query": "%s",
+                "query": repo_url,
                 "fields": [
                     "origin"
                 ]
                 }
             },
-            "should": [
-                {"term":{"state": "closed"}},
-                {"term":{"state": "rejected"}}
+            "must_not": [
+                {"term":{"state": "open"}},
+                {"term":{"state": "progressing"}}
             ]           
             ,
             "filter": {
                 "range": {
                 "closed_at": {
-                    "gte": "%s",
-                    "lt": "%s"
+                    "gte": from_date.strftime("%Y-%m-%d"),
+                    "lt": to_date.strftime("%Y-%m-%d")
                 }
                 }
             }
             }
         }
         }
-        """%(field, repo_url, from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
+        # """%(option, field, repo_url, from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
         return query
 
 
@@ -1033,49 +1184,69 @@ def get_param_score(param, max_value, weight=1):
     return (math.log(1 + param) / math.log(1 + max(param, max_value))) * weight
 
 def criticality_score(item): 
+    total_weight_ACTIVITY  = (CODE_REVIEW_COUNT_WEIGHT_ACTIVITY + CREATED_SINCE_WEIGHT_ACTIVITY + UPDATED_SINCE_WEIGHT_ACTIVITY +
+                            CONTRIBUTOR_COUNT_WEIGHT_ACTIVITY + 
+                            COMMIT_FREQUENCY_WEIGHT_ACTIVITY + 
+                            CLOSED_ISSUES_WEIGHT_ACTIVITY + UPDATED_ISSUES_WEIGHT_ACTIVITY +
+                            COMMENT_FREQUENCY_WEIGHT_ACTIVITY )
     criticality_score = round(  
                         ((get_param_score(item["code_review_count"],
-                                        CODE_REVIEW_COUNT_THRESHOLD , CODE_REVIEW_COUNT_WEIGHT_ACTIVITY)) +
+                                        CODE_REVIEW_COUNT_THRESHOLD_ACTIVITY , CODE_REVIEW_COUNT_WEIGHT_ACTIVITY)) +
                         (get_param_score(item["created_since"],
-                                        CREATED_SINCE_THRESHOLD, CREATED_SINCE_WEIGHT_ACTIVITY)) +
+                                        CREATED_SINCE_THRESHOLD_ACTIVITY, CREATED_SINCE_WEIGHT_ACTIVITY)) +
                         (get_param_score(item["updated_since"],
-                                        UPDATED_SINCE_THRESHOLD, UPDATED_SINCE_WEIGHT_ACTIVITY)) +
+                                        UPDATED_SINCE_THRESHOLD_ACTIVITY, UPDATED_SINCE_WEIGHT_ACTIVITY)) +
                         (get_param_score(item["countributor_count"],
-                                        CONTRIBUTOR_COUNT_THRESHOLD,
+                                        CONTRIBUTOR_COUNT_THRESHOLD_ACTIVITY,
                                         CONTRIBUTOR_COUNT_WEIGHT_ACTIVITY)) +                   
                         (get_param_score(item["commit_frequency"],
-                                        COMMIT_FREQUENCY_THRESHOLD,
+                                        COMMIT_FREQUENCY_THRESHOLD_ACTIVITY,
                                         COMMIT_FREQUENCY_WEIGHT_ACTIVITY)) +                
-                        (get_param_score(item["issue_closed"],
-                                        CLOSED_ISSUES_THRESHOLD, CLOSED_ISSUES_WEIGHT_ACTIVITY)) +
+                        (get_param_score(item["closed_issue_count"],
+                                        CLOSED_ISSUES_THRESHOLD_ACTIVITY, CLOSED_ISSUES_WEIGHT_ACTIVITY)) +
                         (get_param_score(item["updated_issues_count"],
-                                        UPDATED_ISSUES_THRESHOLD, UPDATED_ISSUES_WEIGHT_ACTIVITY)) +
-                        (get_param_score(
-                            item["comment_frequency"], COMMENT_FREQUENCY_THRESHOLD,
-                            COMMENT_FREQUENCY_WEIGHT_ACTIVITY)) ) /
-                        total_weight, 5)
+                                        UPDATED_ISSUES_THRESHOLD_ACTIVITY, UPDATED_ISSUES_WEIGHT_ACTIVITY))) /
+                        total_weight_ACTIVITY, 5)
     return criticality_score
 
 def code_function_quality(item):
+    total_weight_CODE  = (LOC_FREQUENCY_WEIGHT_CODE + CONTRIBUTOR_COUNT_WEIGHT_CODE + COMMIT_FREQUENCY_WEIGHT_CODE +
+                            IS_MAINTAINED_WEIGHT_CODE + 
+                            CODE_REVIREW_WEIGHT_CODE + 
+                            CI_TEST_WEIGHT_CODE )
     score = round(  
                 ((get_param_score(item["LOC_frequency"],
-                                CODE_REVIEW_COUNT_THRESHOLD , CODE_REVIEW_COUNT_WEIGHT_ACTIVITY)) +
-                (get_param_score(item["created_since"],
-                                CREATED_SINCE_THRESHOLD, CREATED_SINCE_WEIGHT_ACTIVITY)) +
-                (get_param_score(item["updated_since"],
-                                UPDATED_SINCE_THRESHOLD, UPDATED_SINCE_WEIGHT_ACTIVITY)) +
+                                LOC_FREQUENCY_THRESHOLD_CODE , LOC_FREQUENCY_WEIGHT_CODE)) +
                 (get_param_score(item["countributor_count"],
-                                CONTRIBUTOR_COUNT_THRESHOLD,
-                                CONTRIBUTOR_COUNT_WEIGHT_ACTIVITY)) +                   
+                                CONTRIBUTOR_COUNT_THRESHOLD_CODE,
+                                CONTRIBUTOR_COUNT_WEIGHT_CODE)) +                   
                 (get_param_score(item["commit_frequency"],
-                                COMMIT_FREQUENCY_THRESHOLD,
-                                COMMIT_FREQUENCY_WEIGHT_ACTIVITY)) +                
-                (get_param_score(item["issue_closed"],
-                                CLOSED_ISSUES_THRESHOLD, CLOSED_ISSUES_WEIGHT_ACTIVITY)) +
-                (get_param_score(item["updated_issues_count"],
-                                UPDATED_ISSUES_THRESHOLD, UPDATED_ISSUES_WEIGHT_ACTIVITY)) +
-                (get_param_score(
-                    item["comment_frequency"], COMMENT_FREQUENCY_THRESHOLD,
-                    COMMENT_FREQUENCY_WEIGHT_ACTIVITY)) ) /
-                total_weight, 5)
-    return criticality_score
+                                COMMIT_FREQUENCY_THRESHOLD_CODE,
+                                COMMIT_FREQUENCY_WEIGHT_CODE)) +                
+                (get_param_score(item["is_maintained"],
+                                IS_MAINTAINED_THRESHOLD_CODE, IS_MAINTAINED_WEIGHT_CODE)) +
+                (get_param_score(item["code_review"],
+                                CODE_REVIREW_THRESHOLD_CODE, CODE_REVIREW_WEIGHT_CODE)) +
+                (get_param_score(item["ci-test"],
+                                CI_TEST_THRESHOLD_CODE, CI_TEST_WEIGHT_CODE))) /
+                total_weight_CODE, 5)
+    return score
+
+def community_support(item):
+    for i in ["issue_first_reponse_avg", "issue_first_reponse_mid", "closed_issue_time_avg","closed_issue_time_mid"]:
+        if not item[i]:
+            item[i] = 90
+    total_weight_COMMUNITY = ISSUE_FIRST_RESPONSE_WEIGHT_COMMUNITY + ISSUE_FIRST_RESPONSE_WEIGHT_COMMUNITY+CLOSED_ISSUES_TIME_WEIGHT_COMMUNITY+CLOSED_ISSUES_TIME_WEIGHT_COMMUNITY
+    score = round(  
+                ((get_param_score(item["issue_first_reponse_avg"],
+                                ISSUE_FIRST_RESPONSE_THRESHOLD_COMMUNITY , ISSUE_FIRST_RESPONSE_WEIGHT_COMMUNITY)) +
+                (get_param_score(item["issue_first_reponse_mid"],
+                                ISSUE_FIRST_RESPONSE_THRESHOLD_COMMUNITY,
+                                ISSUE_FIRST_RESPONSE_WEIGHT_COMMUNITY)) +                   
+                (get_param_score(item["closed_issue_time_avg"],
+                                CLOSED_ISSUES_TIME_THRESHOLD_COMMUNITY,
+                                CLOSED_ISSUES_TIME_WEIGHT_COMMUNITY)) +                
+                (get_param_score(item["closed_issue_time_mid"],
+                                CLOSED_ISSUES_TIME_THRESHOLD_COMMUNITY, CLOSED_ISSUES_TIME_WEIGHT_COMMUNITY))) /
+                total_weight_COMMUNITY, 5)
+    return score
