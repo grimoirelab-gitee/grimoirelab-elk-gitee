@@ -90,20 +90,20 @@ EVENT_COUNT_WEIGHT_COMMUNITY = 0.20125
 # Max thresholds for various parameters.
 CODE_REVIEW_COUNT_THRESHOLD_ACTIVITY = 15
 CREATED_SINCE_THRESHOLD_ACTIVITY = 120
-UPDATED_SINCE_THRESHOLD_ACTIVITY = 120
-CONTRIBUTOR_COUNT_THRESHOLD_ACTIVITY = 1000
+UPDATED_SINCE_THRESHOLD_ACTIVITY = 12
+CONTRIBUTOR_COUNT_THRESHOLD_ACTIVITY = 5000
 ORG_COUNT_THRESHOLD_ACTIVITY = 10
-COMMIT_FREQUENCY_THRESHOLD_ACTIVITY = 500
+COMMIT_FREQUENCY_THRESHOLD_ACTIVITY = 200
 RECENT_RELEASES_THRESHOLD_ACTIVITY = 26
-CLOSED_ISSUES_THRESHOLD_ACTIVITY = 5000
-UPDATED_ISSUES_THRESHOLD_ACTIVITY = 5000
+CLOSED_ISSUES_THRESHOLD_ACTIVITY = 1000
+UPDATED_ISSUES_THRESHOLD_ACTIVITY = 1000
 COMMENT_FREQUENCY_THRESHOLD_ACTIVITY = 15
 DEPENDENTS_COUNT_THRESHOLD_ACTIVITY = 500000
 
 LOC_FREQUENCY_THRESHOLD_CODE = 6000
-COMMIT_FREQUENCY_THRESHOLD_CODE = 500
-IS_MAINTAINED_THRESHOLD_CODE = 10
-CONTRIBUTOR_COUNT_THRESHOLD_CODE = 1000
+COMMIT_FREQUENCY_THRESHOLD_CODE = 200
+IS_MAINTAINED_THRESHOLD_CODE = 1
+CONTRIBUTOR_COUNT_THRESHOLD_CODE = 5000
 CODE_REVIREW_THRESHOLD_CODE = 10
 CI_TEST_THRESHOLD_CODE = 10
 DOWNLOAD_COUT_FREQUENCE_THRESHOLD_CODE = 0 #TODO 0 is tmp
@@ -755,7 +755,7 @@ class GiteeEnrich(Enrich):
                     # except ZeroDivisionError:
                     #     code_review_count = 0               
                     try:                                               
-                        comment_frequency = gitee_issue['aggregations']["count_of_uuid"]['value']/gitee_issue["hits"]["total"]["value"]
+                        comment_frequency = (gitee_issue['aggregations']["count_of_uuid"]['value'])/gitee_issue["hits"]["total"]["value"]
                         gitee_issue_comment_count_sig += gitee_issue['aggregations']["count_of_uuid"]['value']
                         gitee_issue_count_sig += gitee_issue["hits"]["total"]["value"]
                     except ZeroDivisionError:
@@ -767,7 +767,7 @@ class GiteeEnrich(Enrich):
                     created_since = get_time_diff_months(creation_since, str(date))
                     if gitee_updated_since and created_since>=0:
                         updated_since = get_time_diff_months(gitee_updated_since[0]['_source']["metadata__updated_on"], str(date))
-                        updated_since_sig.append(gitee_updated_since[0]['_source']["metadata__updated_on"])
+                        updated_since_sig.append(updated_since)
                     elif len(gitee_updated_since) == 0 and created_since>=0:
                         updated_since = UPDATED_SINCE_THRESHOLD_ACTIVITY
                     else:
@@ -795,7 +795,7 @@ class GiteeEnrich(Enrich):
                     query_LOC_frequency = self.get_uuid_count("sum",repository_url+'.git', "lines_changed",from_date=date-timedelta(days=90), to_date=date)
                     LOC_frequency = es_in.search(index=git_demo_enriched_index, body=query_LOC_frequency)['aggregations']["count_of_uuid"]['value']
                     LOC_frequency_sig += LOC_frequency
-                    dates_90_list = self.get_date_list(datetime_to_utc(date-timedelta(days=90)),datetime_to_utc(date))
+                    dates_90_list = self.get_date_list(datetime_to_utc(date-timedelta(days=90)),datetime_to_utc(date),freq = '30D')
                     
                     query_issue_first_reponse_avg = self.get_uuid_count("avg",repository_url, "time_to_first_attention_without_bot",from_date=date-timedelta(days=90), to_date=date)
                     issue_first_reponse_avg = es_in.search(index=gitee_issues_enrich_index, body=query_issue_first_reponse_avg)['aggregations']["count_of_uuid"]['value']
@@ -831,17 +831,18 @@ class GiteeEnrich(Enrich):
                     for i in issue_open_time_repo:issue_open_time_sig.append(i)
                     
                     issue_open_time_repo_mid = get_medium(issue_open_time_repo)
-                    is_maintained = True
-                    for i in dates_90_list:
-                        query_git_commit_i = self.get_uuid_count("cardinality",repository_url+'.git', "hash",from_date=i-timedelta(days=7), to_date=i)
-                        commit_frequency_i =  es_in.search(index=git_demo_enriched_index, body=query_git_commit_i)['aggregations']["count_of_uuid"]['value']
-                        if  commit_frequency_i==0:
-                            is_maintained = False 
-                            break
-                    if is_maintained:
-                        is_maintained_sig.append(False)
+                    # is_maintained = True
+                    # for i in dates_90_list:
+                    query_git_commit_i = self.get_uuid_count("cardinality",repository_url+'.git', "hash",from_date=date-timedelta(days=90), to_date=date)
+                    commit_frequency_i =  es_in.search(index=git_demo_enriched_index, body=query_git_commit_i)['aggregations']["count_of_uuid"]['value']
+                    if  commit_frequency_i>0:
+                        is_maintained_data = 1
+                        is_maintained_sig.append("True")
+                        is_maintained_com.append("True")
                     else:
-                        is_maintained_sig.append(True)
+                        is_maintained_data = 0
+                        is_maintained_sig.append("False")
+                        is_maintained_com.append("False")
                     
                     
                     activity_data = {
@@ -858,7 +859,7 @@ class GiteeEnrich(Enrich):
                         'closed_issue_count':issue_closed,
                         'comment_frequency':float(comment_frequency),
                         'LOC_frequency': LOC_frequency/12,
-                        'maintained':10 if is_maintained else 0,
+                        'maintained': float(is_maintained_data),
                         'code_review':10,
                         'ci-test':10, 
                         'issue_first_reponse_avg':float(issue_first_reponse_avg)if issue_first_reponse_avg else None,
@@ -893,8 +894,10 @@ class GiteeEnrich(Enrich):
                     continue
 
                 if updated_since_sig and created_since_sig>=0:
-                    updated_since_sig_data = get_time_diff_months(max(updated_since_sig),str(date))  
-                    updated_since_com.append(max(updated_since_sig))             
+                    updated_since_sig_data = sum(updated_since_sig)/len(updated_since_sig)
+                    for i in updated_since_sig:
+                        updated_since_com.append(i) 
+                             
                 elif created_since_sig>=0:
                     updated_since_sig_data =  UPDATED_SINCE_THRESHOLD_ACTIVITY
                 else:
@@ -950,12 +953,9 @@ class GiteeEnrich(Enrich):
                 issue_open_time_sig_mid = get_medium(issue_open_time_sig)
                 # if activity_data["is_maintained"]:
                 #     is_maintained_sig = True
-                if True in is_maintained_sig:
-                    is_maintained_sig_data = 10
-                    is_maintained_com.append(True)
-                else:
-                    is_maintained_sig_data = 0
-                    is_maintained_com.append(False)
+                if is_maintained_sig:
+                    is_maintained_sig_data = is_maintained_sig.count("True")/ len(is_maintained_sig)
+                    # is_maintained_com.append(is_maintained_sig)
                 activity_sig_data = {
                     'uuid': uuid_date_sig,
                     'project': project,
@@ -969,7 +969,7 @@ class GiteeEnrich(Enrich):
                     'closed_issue_count': issue_closed_sig,
                     'comment_frequency': float(comment_frequency_sig_data),
                     'LOC_frequency': LOC_frequency_sig/12,
-                    'maintained':is_maintained_sig_data,
+                    'maintained':float(is_maintained_sig_data),
                     'code_review':10,
                     'ci-test':10, 
                     'issue_first_reponse_avg':float(issue_first_reponse_sig_avg) if issue_first_reponse_sig_avg else None,
@@ -1005,6 +1005,7 @@ class GiteeEnrich(Enrich):
                 gitee_issue_comment_count_com += gitee_issue_comment_count_sig
                 gitee_issue_count_com += gitee_issue_count_sig
                 LOC_frequency_com += LOC_frequency_sig
+                
             
             uuid_date_com = uuid("openeuler", str(date))
 
@@ -1017,7 +1018,7 @@ class GiteeEnrich(Enrich):
                 continue
 
             if updated_since_com and created_since_com>0: 
-                updated_since_com_data = get_time_diff_months( max(updated_since_com),str(date))               
+                updated_since_com_data = sum(updated_since_com)/len(updated_since_com)        
             elif created_since_com>0 :
                 updated_since_com_data =  UPDATED_SINCE_THRESHOLD_ACTIVITY
             else:
@@ -1065,7 +1066,13 @@ class GiteeEnrich(Enrich):
                     "match_phrase": {
                         "tag": i}} for i in allrepo]
             contributor_count_com = es_in.search(index=(git_demo_enriched_index,gitee_issues_enrich_index), body=query_author_uuid_data)['aggregations']["count_of_uuid"]['value']
-             
+            if is_maintained_com:
+               
+                is_maintained_com_data = is_maintained_com.count("True")/len(is_maintained_com)
+                print("is_maintained_com.count(\"True\")",is_maintained_com.count("True"))
+                print("len(is_maintained_com)", len(is_maintained_com))
+            else:
+                is_maintained_com_data = 0
             activity_com_data = {
                     'uuid': uuid_date_com,                    
                     'level': "community",  
@@ -1082,10 +1089,9 @@ class GiteeEnrich(Enrich):
                     'issue_first_reponse_mid':float(issue_first_reponse_com_mid) if issue_first_reponse_com_mid else None,
                     'issue_open_time_avg':float(issue_open_time_com_avg) if issue_open_time_com_avg else None,
                     'issue_open_time_mid':float(issue_open_time_com_mid) if issue_open_time_com_mid else None,
-                    'maintained':10 if True in is_maintained_com else 0,
+                    'maintained':float(is_maintained_com_data),
                     'code_review':10,
-                    'ci-test':10,
-                    
+                    'ci-test':10,               
                     # 'criticality_score': criticality_score,
                     'grimoire_creation_date': date.isoformat(),                                  
                     'metadata__enriched_on': datetime_utcnow().isoformat()
@@ -1107,8 +1113,8 @@ class GiteeEnrich(Enrich):
 
         logger.info("[enrich-activity] End study")
 
-    def get_date_list(self, begin_date, end_date):
-        date_list = [x for x in list(pd.date_range(freq='7D', start=begin_date, end=end_date))]
+    def get_date_list(self, begin_date, end_date, freq = '7D'):
+        date_list = [x for x in list(pd.date_range(freq=freq, start=begin_date, end=end_date))]
         return date_list
 
     def get_data_before_dates(self, repository_url, date):
